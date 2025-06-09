@@ -4,7 +4,6 @@ import uuid
 from datetime import datetime
 import json
 import time
-import os
 
 # Configure Streamlit page
 st.set_page_config(
@@ -18,15 +17,16 @@ st.set_page_config(
 def init_aws_clients():
     return {
         's3': boto3.client('s3', region_name='us-east-1'),
-        'bedrock_agent': boto3.client('bedrock-agent-runtime', region_name='us-east-1')
+        'bedrock_agent': boto3.client('bedrock-agent-runtime', region_name='us-east-1'),
+        'lambda': boto3.client('lambda', region_name='us-east-1')
     }
 
 clients = init_aws_clients()
 
-# Configuration - Use environment variables for production
-S3_BUCKET = os.getenv("S3_BUCKET", "essencemirror-user-uploads")
-AGENT_ID = os.getenv("AGENT_ID", "WWIUY28GRY")
-AGENT_ALIAS_ID = os.getenv("AGENT_ALIAS_ID", "TSTALIASID")
+# Configuration
+S3_BUCKET = "essencemirror-user-uploads"
+AGENT_ID = "WWIUY28GRY"
+AGENT_ALIAS_ID = "TSTALIASID"
 
 def upload_image_to_s3(uploaded_file):
     """Upload image to S3 and return the key"""
@@ -72,6 +72,170 @@ def invoke_bedrock_agent(message, session_id):
         st.error(f"Error invoking agent: {str(e)}")
         return None
 
+def generate_recommendations_direct(session_id):
+    """Generate recommendations using Lambda function directly"""
+    try:
+        # Call Lambda function directly for better control
+        recommendations_event = {
+            "messageVersion": "1.0",
+            "sessionId": session_id,
+            "actionGroup": "EssenceMirrorActions",
+            "httpMethod": "POST",
+            "apiPath": "/generateRecommendations",
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "properties": [
+                            {
+                                "name": "lifestyle_focus",
+                                "value": "general"
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+        
+        lambda_response = clients['lambda'].invoke(
+            FunctionName='essenceMirror',
+            Payload=json.dumps(recommendations_event)
+        )
+        
+        response_payload = json.loads(lambda_response['Payload'].read())
+        
+        if 'response' in response_payload and 'responseBody' in response_payload['response']:
+            response_body = response_payload['response']['responseBody']
+            if 'application/json' in response_body:
+                body_content = json.loads(response_body['application/json']['body'])
+                
+                if 'recommendations' in body_content:
+                    return body_content['recommendations']
+                elif 'error' in body_content:
+                    st.error(f"Error generating recommendations: {body_content['error']}")
+                    return None
+        
+        return None
+        
+    except Exception as e:
+        st.error(f"Error generating recommendations: {str(e)}")
+        return None
+
+def generate_style_collage(session_id, category="lifestyle"):
+    """Generate a category-specific style collage using Nova Canvas"""
+    try:
+        # Call the Lambda function directly for Nova Canvas
+        test_event = {
+            "messageVersion": "1.0",
+            "sessionId": session_id,
+            "actionGroup": "EssenceMirrorActions",
+            "httpMethod": "POST",
+            "apiPath": "/generateStyleCollage",
+            "requestBody": {
+                "content": {
+                    "application/json": {
+                        "properties": [
+                            {
+                                "name": "style_focus",
+                                "value": category
+                            },
+                            {
+                                "name": "color_preference",
+                                "value": "personalized"
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+        
+        lambda_response = clients['lambda'].invoke(
+            FunctionName='essenceMirror',
+            Payload=json.dumps(test_event)
+        )
+        
+        response_payload = json.loads(lambda_response['Payload'].read())
+        
+        if 'response' in response_payload and 'responseBody' in response_payload['response']:
+            response_body = response_payload['response']['responseBody']
+            if 'application/json' in response_body:
+                body_content = json.loads(response_body['application/json']['body'])
+                
+                # Return both URL, base64, and prompt for better display options
+                result = {}
+                if 'collage_url' in body_content:
+                    result['url'] = body_content['collage_url']
+                if 'collage_base64' in body_content:
+                    result['base64'] = body_content['collage_base64']
+                if 'prompt_used' in body_content:
+                    result['prompt_used'] = body_content['prompt_used']
+                
+                if result:
+                    return result
+                elif 'error' in body_content:
+                    st.error(f"Error generating collage: {body_content['error']}")
+                    return None
+        
+        return None
+        
+    except Exception as e:
+        st.error(f"Error generating style collage: {str(e)}")
+        return None
+
+def display_recommendations(recommendations):
+    """Display recommendations in a user-friendly format at the top"""
+    if not recommendations:
+        st.warning("No recommendations available")
+        return
+    
+    st.markdown("#### 🌟 Your Personalized Recommendations")
+    
+    # Create tabs for different categories if we have structured data
+    if isinstance(recommendations, list) and len(recommendations) > 0:
+        # Check if recommendations are structured
+        if isinstance(recommendations[0], dict) and 'category' in recommendations[0]:
+            # Group recommendations by category
+            categories = {}
+            for rec in recommendations:
+                category = rec.get('category', 'General')
+                if category not in categories:
+                    categories[category] = []
+                categories[category].append(rec)
+            
+            # Create tabs for each category
+            if len(categories) > 1:
+                tab_names = list(categories.keys())
+                tabs = st.tabs([f"🎯 {cat}" for cat in tab_names])
+                
+                for i, (category, recs) in enumerate(categories.items()):
+                    with tabs[i]:
+                        for j, rec in enumerate(recs, 1):
+                            with st.container():
+                                st.markdown(f"**💡 Recommendation {j}:**")
+                                st.write(rec.get('recommendation', 'N/A'))
+                                if 'rationale' in rec and rec['rationale']:
+                                    with st.expander("💭 Why this works for you"):
+                                        st.write(rec.get('rationale', 'N/A'))
+                                st.markdown("---")
+            else:
+                # Single category - display directly
+                category_name = list(categories.keys())[0]
+                recs = categories[category_name]
+                for j, rec in enumerate(recs, 1):
+                    with st.container():
+                        st.markdown(f"**💡 {category_name} Recommendation {j}:**")
+                        st.write(rec.get('recommendation', 'N/A'))
+                        if 'rationale' in rec and rec['rationale']:
+                            with st.expander("💭 Why this works for you"):
+                                st.write(rec.get('rationale', 'N/A'))
+                        st.markdown("---")
+        else:
+            # Simple list format
+            for i, rec in enumerate(recommendations, 1):
+                st.markdown(f"**{i}.** {rec}")
+    else:
+        # Text format
+        st.write(recommendations)
+
 def main():
     # Header
     st.title("✨ EssenceMirror")
@@ -84,10 +248,14 @@ def main():
         st.session_state.analysis_complete = False
     if 'profile_data' not in st.session_state:
         st.session_state.profile_data = None
-    if 'chat_history' not in st.session_state:
-        st.session_state.chat_history = []
     if 'recommendations_generated' not in st.session_state:
         st.session_state.recommendations_generated = False
+    if 'recommendations_data' not in st.session_state:
+        st.session_state.recommendations_data = None
+    if 'collage_data' not in st.session_state:
+        st.session_state.collage_data = None
+    if 'collage_category' not in st.session_state:
+        st.session_state.collage_category = 'lifestyle'
     
     # Sidebar
     with st.sidebar:
@@ -95,21 +263,20 @@ def main():
         st.markdown("1. 📸 Upload your photo")
         st.markdown("2. 🔍 AI analyzes your style")
         st.markdown("3. ✨ Get personalized recommendations")
-        st.markdown("4. 💬 Chat with your style advisor")
-        st.markdown("5. 🔄 Update your profile anytime")
+        st.markdown("4. 🎨 Generate visual mood board")
         st.markdown("---")
         st.markdown(f"**Session ID:** `{st.session_state.session_id[:8]}...`")
         
-        # Reset session button
-        if st.button("🔄 Start New Session"):
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            st.rerun()
+        # Nova Canvas info
+        st.markdown("---")
+        st.markdown("### 🎨 New Feature!")
+        st.markdown("**Visual Style Collages** powered by Amazon Nova Canvas")
+        st.markdown("Generate beautiful mood boards based on your personal style!")
     
-    # Create tabs for different features
-    tab1, tab2, tab3, tab4 = st.tabs(["📸 Image Analysis", "🎯 Profile & Recommendations", "💬 Chat with Agent", "⚙️ Profile Settings"])
+    # Main content - 3 columns now
+    col1, col2, col3 = st.columns([1, 1, 1])
     
-    with tab1:
+    with col1:
         st.markdown("### 📸 Upload Your Photo")
         
         uploaded_file = st.file_uploader(
@@ -142,292 +309,157 @@ def main():
                         if analysis_response:
                             st.session_state.profile_data = analysis_response
                             st.session_state.analysis_complete = True
-                            st.session_state.chat_history.append({
-                                "type": "analysis",
-                                "message": analysis_message,
-                                "response": analysis_response,
-                                "timestamp": datetime.now()
-                            })
-                            st.success("✅ Analysis complete! Check the Profile & Recommendations tab.")
+                            st.success("✅ Analysis complete!")
                             st.rerun()
     
-    with tab2:
+    with col2:
         st.markdown("### 🎯 Your Style Profile & Recommendations")
         
         if st.session_state.analysis_complete and st.session_state.profile_data:
-            # Display analysis results
-            st.markdown("#### 📋 Your Style Analysis:")
-            st.write(st.session_state.profile_data)
-            
-            # Generate recommendations button
-            col1, col2 = st.columns([1, 1])
-            
-            with col1:
-                if st.button("✨ Get My Recommendations", type="primary"):
+            # Generate recommendations button (prominent at top)
+            if not st.session_state.recommendations_generated:
+                if st.button("✨ Get My Recommendations", type="primary", use_container_width=True):
                     with st.spinner("Generating your personalized recommendations..."):
-                        recommendations_response = invoke_bedrock_agent(
-                            "Generate recommendations", 
-                            st.session_state.session_id
-                        )
+                        recommendations = generate_recommendations_direct(st.session_state.session_id)
                         
-                        if recommendations_response:
-                            st.session_state.recommendations_data = recommendations_response
+                        if recommendations:
+                            st.session_state.recommendations_data = recommendations
                             st.session_state.recommendations_generated = True
-                            st.session_state.chat_history.append({
-                                "type": "recommendations",
-                                "message": "Generate recommendations",
-                                "response": recommendations_response,
-                                "timestamp": datetime.now()
-                            })
-                            st.balloons()
                             st.success("🎉 Your personalized recommendations are ready!")
                             st.rerun()
             
-            with col2:
-                if st.button("🔄 Update My Profile"):
-                    st.info("💡 Use the Profile Settings tab or Chat tab to update your profile!")
+            # Display recommendations prominently if available
+            if st.session_state.recommendations_generated and st.session_state.recommendations_data:
+                display_recommendations(st.session_state.recommendations_data)
+                st.markdown("---")
             
-            # Display recommendations if generated
-            if st.session_state.recommendations_generated and 'recommendations_data' in st.session_state:
-                st.markdown("#### 🌟 Your Personalized Recommendations:")
-                st.write(st.session_state.recommendations_data)
+            # Analysis results (moved below recommendations)
+            with st.expander("📊 View Detailed Style Analysis", expanded=False):
+                st.markdown("#### Analysis Results:")
+                st.write(st.session_state.profile_data)
                 
-                # Quick action buttons
-                st.markdown("#### 🚀 Quick Actions:")
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    if st.button("🎨 Focus on Wardrobe"):
-                        with st.spinner("Getting wardrobe-focused recommendations..."):
-                            wardrobe_response = invoke_bedrock_agent(
-                                "Give me more detailed wardrobe recommendations", 
-                                st.session_state.session_id
-                            )
-                            if wardrobe_response:
-                                st.write("**Wardrobe Focus:**")
-                                st.write(wardrobe_response)
-                
-                with col2:
-                    if st.button("🏠 Focus on Interior"):
-                        with st.spinner("Getting interior design recommendations..."):
-                            interior_response = invoke_bedrock_agent(
-                                "Give me more detailed interior design recommendations", 
-                                st.session_state.session_id
-                            )
-                            if interior_response:
-                                st.write("**Interior Focus:**")
-                                st.write(interior_response)
-                
-                with col3:
-                    if st.button("✈️ Focus on Travel"):
-                        with st.spinner("Getting travel recommendations..."):
-                            travel_response = invoke_bedrock_agent(
-                                "Give me more detailed travel recommendations", 
-                                st.session_state.session_id
-                            )
-                            if travel_response:
-                                st.write("**Travel Focus:**")
-                                st.write(travel_response)
         else:
-            st.info("👆 Upload and analyze an image first to see your profile and get recommendations!")
+            st.info("👆 Upload an image to get started with your style analysis!")
     
-    with tab3:
-        st.markdown("### 💬 Chat with Your Style Advisor")
+    # NEW COLUMN: Nova Canvas Style Collage
+    with col3:
+        st.markdown("### 🎨 Visual Style Collages")
         
         if st.session_state.analysis_complete:
-            # Display chat history
-            if st.session_state.chat_history:
-                st.markdown("#### 📜 Conversation History:")
-                for i, chat in enumerate(st.session_state.chat_history):
-                    with st.expander(f"💬 {chat['type'].title()} - {chat['timestamp'].strftime('%H:%M:%S')}"):
-                        st.write(f"**You:** {chat['message']}")
-                        st.write(f"**EssenceMirror:** {chat['response']}")
+            st.markdown("#### Choose Your Collage Type")
+            st.write("Generate beautiful mood boards focused on specific areas of your lifestyle!")
             
-            # Chat input
-            st.markdown("#### 💭 Ask me anything about your style:")
+            # Category selection
+            collage_categories = {
+                "wardrobe": "👗 Wardrobe & Fashion",
+                "interior": "🏠 Home & Interior Design", 
+                "travel": "✈️ Travel & Experiences",
+                "lifestyle": "🌟 Complete Lifestyle"
+            }
             
-            # Predefined quick questions
-            st.markdown("**Quick Questions:**")
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                if st.button("❓ What colors suit me best?"):
-                    user_message = "What colors suit me best based on my analysis?"
-                    with st.spinner("Getting color recommendations..."):
-                        response = invoke_bedrock_agent(user_message, st.session_state.session_id)
-                        if response:
-                            st.session_state.chat_history.append({
-                                "type": "chat",
-                                "message": user_message,
-                                "response": response,
-                                "timestamp": datetime.now()
-                            })
-                            st.write(f"**EssenceMirror:** {response}")
-                
-                if st.button("❓ How can I improve my style?"):
-                    user_message = "How can I improve my personal style?"
-                    with st.spinner("Getting style improvement tips..."):
-                        response = invoke_bedrock_agent(user_message, st.session_state.session_id)
-                        if response:
-                            st.session_state.chat_history.append({
-                                "type": "chat",
-                                "message": user_message,
-                                "response": response,
-                                "timestamp": datetime.now()
-                            })
-                            st.write(f"**EssenceMirror:** {response}")
-            
-            with col2:
-                if st.button("❓ What's my style archetype?"):
-                    user_message = "Tell me more about my style archetype and what it means"
-                    with st.spinner("Explaining your archetype..."):
-                        response = invoke_bedrock_agent(user_message, st.session_state.session_id)
-                        if response:
-                            st.session_state.chat_history.append({
-                                "type": "chat",
-                                "message": user_message,
-                                "response": response,
-                                "timestamp": datetime.now()
-                            })
-                            st.write(f"**EssenceMirror:** {response}")
-                
-                if st.button("❓ Budget-friendly options?"):
-                    user_message = "Can you give me budget-friendly recommendations?"
-                    with st.spinner("Finding budget options..."):
-                        response = invoke_bedrock_agent(user_message, st.session_state.session_id)
-                        if response:
-                            st.session_state.chat_history.append({
-                                "type": "chat",
-                                "message": user_message,
-                                "response": response,
-                                "timestamp": datetime.now()
-                            })
-                            st.write(f"**EssenceMirror:** {response}")
-            
-            # Custom message input
-            user_input = st.text_input("💬 Type your question:", placeholder="e.g., What accessories would work well with my style?")
-            
-            if st.button("Send Message", type="primary") and user_input:
-                with st.spinner("Getting response..."):
-                    response = invoke_bedrock_agent(user_input, st.session_state.session_id)
-                    if response:
-                        st.session_state.chat_history.append({
-                            "type": "chat",
-                            "message": user_input,
-                            "response": response,
-                            "timestamp": datetime.now()
-                        })
-                        st.write(f"**You:** {user_input}")
-                        st.write(f"**EssenceMirror:** {response}")
-                        st.rerun()
-        else:
-            st.info("👆 Complete your image analysis first to start chatting with your style advisor!")
-    
-    with tab4:
-        st.markdown("### ⚙️ Profile Settings & Updates")
-        
-        if st.session_state.analysis_complete:
-            st.markdown("#### 🔄 Update Your Profile")
-            st.info("You can update specific aspects of your profile or provide additional context.")
-            
-            # Profile update options
-            update_type = st.selectbox(
-                "What would you like to update?",
-                ["Select an option...", "Style Preferences", "Lifestyle Information", "Budget Constraints", "Specific Goals", "Custom Update"]
+            selected_category = st.selectbox(
+                "Select collage focus:",
+                options=list(collage_categories.keys()),
+                format_func=lambda x: collage_categories[x],
+                index=0
             )
             
-            if update_type != "Select an option...":
-                if update_type == "Style Preferences":
-                    st.markdown("**Update your style preferences:**")
-                    style_pref = st.text_area("Describe your style preferences:", placeholder="e.g., I prefer minimalist designs, love vintage pieces, or want to look more professional...")
+            # Style collage generation button
+            if st.button(f"🎨 Generate {collage_categories[selected_category]} Collage", type="primary"):
+                with st.spinner(f"Creating your personalized {collage_categories[selected_category].lower()} collage... This may take a few seconds."):
+                    collage_result = generate_style_collage(st.session_state.session_id, selected_category)
                     
-                    if st.button("Update Style Preferences") and style_pref:
-                        update_message = f"Please update my profile with these style preferences: {style_pref}"
-                        with st.spinner("Updating your style preferences..."):
-                            response = invoke_bedrock_agent(update_message, st.session_state.session_id)
-                            if response:
-                                st.success("✅ Style preferences updated!")
-                                st.write(response)
-                
-                elif update_type == "Lifestyle Information":
-                    st.markdown("**Update your lifestyle information:**")
-                    lifestyle_info = st.text_area("Describe your lifestyle:", placeholder="e.g., I work from home, attend many social events, am very active outdoors...")
-                    
-                    if st.button("Update Lifestyle Info") and lifestyle_info:
-                        update_message = f"Please update my profile with this lifestyle information: {lifestyle_info}"
-                        with st.spinner("Updating your lifestyle information..."):
-                            response = invoke_bedrock_agent(update_message, st.session_state.session_id)
-                            if response:
-                                st.success("✅ Lifestyle information updated!")
-                                st.write(response)
-                
-                elif update_type == "Budget Constraints":
-                    st.markdown("**Set your budget preferences:**")
-                    budget_range = st.selectbox("Select your budget range:", 
-                                              ["Under $50", "$50-100", "$100-300", "$300-500", "$500-1000", "$1000+", "Custom"])
-                    
-                    if budget_range == "Custom":
-                        custom_budget = st.text_input("Enter your custom budget range:")
-                        budget_range = custom_budget if custom_budget else budget_range
-                    
-                    if st.button("Update Budget Preferences"):
-                        update_message = f"Please update my profile with this budget range: {budget_range}"
-                        with st.spinner("Updating your budget preferences..."):
-                            response = invoke_bedrock_agent(update_message, st.session_state.session_id)
-                            if response:
-                                st.success("✅ Budget preferences updated!")
-                                st.write(response)
-                
-                elif update_type == "Specific Goals":
-                    st.markdown("**Set your style goals:**")
-                    goals = st.text_area("What are your style goals?", placeholder="e.g., Look more professional for work, develop a signature style, prepare for a special event...")
-                    
-                    if st.button("Update Style Goals") and goals:
-                        update_message = f"Please update my profile with these style goals: {goals}"
-                        with st.spinner("Updating your style goals..."):
-                            response = invoke_bedrock_agent(update_message, st.session_state.session_id)
-                            if response:
-                                st.success("✅ Style goals updated!")
-                                st.write(response)
-                
-                elif update_type == "Custom Update":
-                    st.markdown("**Custom profile update:**")
-                    custom_update = st.text_area("What would you like to update or add to your profile?", placeholder="Describe any changes or additional information...")
-                    
-                    if st.button("Apply Custom Update") and custom_update:
-                        update_message = f"Please update my profile: {custom_update}"
-                        with st.spinner("Applying your custom update..."):
-                            response = invoke_bedrock_agent(update_message, st.session_state.session_id)
-                            if response:
-                                st.success("✅ Profile updated!")
-                                st.write(response)
+                    if collage_result:
+                        st.session_state.collage_data = collage_result
+                        st.session_state.collage_category = selected_category
+                        st.success(f"🎉 Your {collage_categories[selected_category].lower()} collage is ready!")
+                        st.rerun()
             
-            # Profile confirmation
-            st.markdown("---")
-            st.markdown("#### ✅ Profile Management")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("📋 View Current Profile"):
-                    with st.spinner("Retrieving your current profile..."):
-                        response = invoke_bedrock_agent("Show me my current profile summary", st.session_state.session_id)
-                        if response:
-                            st.write("**Your Current Profile:**")
-                            st.write(response)
-            
-            with col2:
-                if st.button("✅ Confirm Profile"):
-                    with st.spinner("Confirming your profile..."):
-                        response = invoke_bedrock_agent("Please confirm my profile", st.session_state.session_id)
-                        if response:
-                            st.success("✅ Profile confirmed!")
-                            st.write(response)
+            # Display generated collage
+            if hasattr(st.session_state, 'collage_data') and st.session_state.collage_data:
+                category_name = collage_categories.get(st.session_state.get('collage_category', 'lifestyle'), 'Style')
+                st.markdown(f"#### 🖼️ Your {category_name} Collage:")
+                
+                # Try to display the image using different methods
+                collage_displayed = False
+                
+                # Method 1: Try base64 if available
+                if 'base64' in st.session_state.collage_data:
+                    try:
+                        import base64
+                        from io import BytesIO
+                        
+                        # Decode base64 image
+                        image_data = base64.b64decode(st.session_state.collage_data['base64'])
+                        
+                        # Display using st.image with BytesIO
+                        st.image(
+                            BytesIO(image_data),
+                            caption=f"Your AI-Generated {category_name} Mood Board", 
+                            use_column_width=True
+                        )
+                        collage_displayed = True
+                        
+                        # Display the prompt used (for troubleshooting)
+                        if 'prompt_used' in st.session_state.collage_data:
+                            with st.expander("🔍 View Prompt Used"):
+                                st.text_area("Prompt for Nova Canvas", 
+                                            st.session_state.collage_data['prompt_used'], 
+                                            height=200)
+                        
+                    except Exception as e:
+                        st.warning(f"Could not display image from base64: {str(e)}")
+                
+                # Method 2: Try URL if base64 failed
+                if not collage_displayed and 'url' in st.session_state.collage_data:
+                    try:
+                        st.image(
+                            st.session_state.collage_data['url'], 
+                            caption=f"Your AI-Generated {category_name} Mood Board", 
+                            use_column_width=True
+                        )
+                        collage_displayed = True
+                        
+                    except Exception as e:
+                        st.warning(f"Could not display image from URL: {str(e)}")
+                
+                # Method 3: Fallback to link
+                if not collage_displayed:
+                    st.error("Could not display image directly. Here's the link:")
+                    if 'url' in st.session_state.collage_data:
+                        st.markdown(f"[🔗 View Your {category_name} Collage]({st.session_state.collage_data['url']})")
+                
+                # Additional options
+                if collage_displayed:
+                    col_a, col_b, col_c = st.columns(3)
+                    
+                    with col_a:
+                        if st.button("🔄 Generate New"):
+                            with st.spinner(f"Creating a new {collage_categories[st.session_state.collage_category].lower()} collage..."):
+                                new_collage = generate_style_collage(st.session_state.session_id, st.session_state.collage_category)
+                                if new_collage:
+                                    st.session_state.collage_data = new_collage
+                                    st.success("🎉 New collage generated!")
+                                    st.rerun()
+                    
+                    with col_b:
+                        if 'url' in st.session_state.collage_data:
+                            st.markdown(f"[🔗 Full Size]({st.session_state.collage_data['url']})")
+                    
+                    with col_c:
+                        # Category switch button
+                        if st.button("🎯 Change Focus"):
+                            # Clear current collage to show category selector
+                            if hasattr(st.session_state, 'collage_data'):
+                                del st.session_state.collage_data
+                            st.rerun()
+                
         else:
-            st.info("👆 Complete your image analysis first to access profile settings!")
+            st.info("Complete your style analysis first to generate visual collages!")
     
     # Footer
     st.markdown("---")
-    st.markdown("*Powered by Amazon Bedrock and Nova Pro AI*")
+    st.markdown("*Powered by Amazon Bedrock, Nova Pro AI, and Nova Canvas*")
 
 if __name__ == "__main__":
     main()
