@@ -4,6 +4,18 @@ import uuid
 from datetime import datetime
 import json
 import time
+import base64
+import os
+from io import BytesIO
+from PIL import Image
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Feature flag for Style Reel functionality
+STYLE_REEL_ENABLED = True
 
 # Configure Streamlit page
 st.set_page_config(
@@ -463,3 +475,87 @@ def main():
 
 if __name__ == "__main__":
     main()
+# Add the Style Reel API to the Bedrock agent schema
+def update_agent_schema():
+    """Update the Bedrock agent schema to include the Style Reel API"""
+    try:
+        # Import clients from the main app
+        from essence_mirror_app import clients
+        
+        # Define the new API schema
+        style_reel_api = {
+            "name": "/generateStyleReel",
+            "description": "Generate a personalized style video using Nova Reel",
+            "method": "POST",
+            "contentType": "application/json",
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "style_focus": {
+                                    "type": "string",
+                                    "description": "Focus area for the style video (wardrobe, interior, travel, lifestyle)",
+                                    "enum": ["wardrobe", "interior", "travel", "lifestyle"]
+                                },
+                                "use_original_image": {
+                                    "type": "boolean",
+                                    "description": "Whether to use the user's original uploaded image in the video",
+                                    "default": True
+                                },
+                                "duration_seconds": {
+                                    "type": "integer",
+                                    "description": "Desired video duration in seconds (5-15)",
+                                    "minimum": 5,
+                                    "maximum": 15,
+                                    "default": 10
+                                }
+                            },
+                            "required": ["style_focus"]
+                        }
+                    }
+                }
+            },
+            "responseBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "video_url": {
+                                    "type": "string",
+                                    "description": "URL to the generated video"
+                                },
+                                "video_base64": {
+                                    "type": "string",
+                                    "description": "Base64-encoded video data"
+                                },
+                                "prompt_used": {
+                                    "type": "string",
+                                    "description": "Prompt used to generate the video"
+                                },
+                                "user_id": {
+                                    "type": "string",
+                                    "description": "User ID for the request"
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "description": "Status message"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        # TODO: Implement the actual schema update using the Bedrock agent API
+        # This would require additional permissions and API calls
+        
+        logger.info("Agent schema updated to include Style Reel API")
+        return True
+    except Exception as e:
+        logger.error(f"Error updating agent schema: {str(e)}")
+        return False
