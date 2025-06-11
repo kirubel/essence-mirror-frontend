@@ -24,7 +24,7 @@ try:
         extract_style_elements,
         analyze_image_basic
     )
-    from nova_reel_generator import NovaReelGenerator
+    from nova_reel_generator_fixed import NovaReelGenerator
 except ImportError as e:
     st.error(f"Error importing video generation modules: {str(e)}")
     st.info("Make sure the infrastructure components are properly set up.")
@@ -201,15 +201,9 @@ def render_style_reel_tab(session_id, analysis_complete):
                 key="video_style_focus"
             )
             
-            # Duration selection
-            duration = st.slider(
-                "Video Duration (seconds):",
-                min_value=5,
-                max_value=15,
-                value=8,
-                step=1,
-                key="video_duration"
-            )
+            # Duration selection (fixed to 6 seconds for TEXT_VIDEO)
+            st.info("ℹ️ Video duration is fixed at 6 seconds for Nova Reel TEXT_VIDEO tasks")
+            duration = 6
             
             # Optional text prompt
             user_prompt = st.text_area(
