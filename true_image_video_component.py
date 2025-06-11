@@ -17,11 +17,17 @@ import logging
 # Add the infrastructure directory to the path
 sys.path.append('/Users/kirubelaklilu/Documents/EssenceMirror/essence-mirror-infrastructure')
 
+# Add the current directory to the path for imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 try:
     from true_image_to_video_generator import TrueImageToVideoGenerator
+    GENERATOR_AVAILABLE = True
 except ImportError as e:
     st.error(f"Error importing true image-to-video modules: {str(e)}")
     st.info("Make sure the true image-to-video components are properly set up.")
+    GENERATOR_AVAILABLE = False
+    TrueImageToVideoGenerator = None
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -42,6 +48,9 @@ def save_uploaded_file_temporarily(uploaded_file):
 
 def generate_personalized_recommendation_video(image_path, style_focus, specific_recommendations=None, user_id=None):
     """Generate a video showing the actual user wearing recommended styles"""
+    if not GENERATOR_AVAILABLE:
+        raise Exception("TrueImageToVideoGenerator not available - check infrastructure setup")
+        
     try:
         # Initialize the true image-to-video generator with environment credentials
         generator = TrueImageToVideoGenerator(s3_bucket=S3_BUCKET, profile_name=None)
@@ -62,6 +71,12 @@ def generate_personalized_recommendation_video(image_path, style_focus, specific
 
 def check_video_status(job_info):
     """Check the status of a video generation job"""
+    if not GENERATOR_AVAILABLE:
+        return {
+            "status": "ERROR",
+            "errorMessage": "TrueImageToVideoGenerator not available - check infrastructure setup"
+        }
+        
     try:
         # Initialize the generator for status checking with environment credentials
         generator = TrueImageToVideoGenerator(s3_bucket=S3_BUCKET, profile_name=None)
@@ -109,6 +124,23 @@ def render_true_image_video_tab(session_id, analysis_complete):
     
     st.markdown("### 🎬 Personalized Style Videos")
     st.markdown("**BREAKTHROUGH**: Upload your photo and see **yourself** wearing recommended styles in AI-generated videos!")
+    
+    # Check if the generator is available
+    if not GENERATOR_AVAILABLE:
+        st.error("🚧 True Image-to-Video functionality is currently unavailable")
+        st.info("""
+        **Missing Component**: The true image-to-video generator is not available.
+        
+        **This could be because:**
+        - The infrastructure component is not deployed
+        - Import path issues in the deployment environment
+        - Missing dependencies
+        
+        **For now, you can:**
+        - Use the Style Analysis and Visual Collages features
+        - Check back later when the component is available
+        """)
+        return
     
     # Highlight the breakthrough
     st.success("🎉 **NEW**: Nova Reel now shows the ACTUAL uploaded person in videos - not just generic people!")
