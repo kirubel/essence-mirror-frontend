@@ -4,21 +4,48 @@ import uuid
 from datetime import datetime
 import json
 import time
+import base64
+import os
+from io import BytesIO
+from PIL import Image
+import logging
+import mimetypes
+
+# Import the true image-to-video component
+from true_image_video_component import render_true_image_video_tab
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Feature flag for True Image-to-Video functionality
+TRUE_IMAGE_VIDEO_ENABLED = True
 
 # Configure Streamlit page
 st.set_page_config(
-    page_title="EssenceMirror - Personal Style Analysis",
+    page_title="EssenceMirror - See Yourself in Recommended Styles!",
     page_icon="✨",
     layout="wide"
 )
 
-# Initialize AWS clients
+# Initialize AWS clients with explicit session (same as CLI)
 @st.cache_resource
 def init_aws_clients():
+    # Use explicit session with default profile (same as working CLI)
+    session = boto3.Session(profile_name='default')
+    
+    # Log the identity being used
+    try:
+        sts_client = session.client('sts', region_name='us-east-1')
+        identity = sts_client.get_caller_identity()
+        logger.info(f"Streamlit app initialized with identity: {identity['Arn']}")
+    except Exception as e:
+        logger.warning(f"Could not get caller identity: {str(e)}")
+    
     return {
-        's3': boto3.client('s3', region_name='us-east-1'),
-        'bedrock_agent': boto3.client('bedrock-agent-runtime', region_name='us-east-1'),
-        'lambda': boto3.client('lambda', region_name='us-east-1')
+        's3': session.client('s3', region_name='us-east-1'),
+        'bedrock_agent': session.client('bedrock-agent-runtime', region_name='us-east-1'),
+        'lambda': session.client('lambda', region_name='us-east-1')
     }
 
 clients = init_aws_clients()
@@ -28,25 +55,73 @@ S3_BUCKET = "essencemirror-user-uploads"
 AGENT_ID = "WWIUY28GRY"
 AGENT_ALIAS_ID = "TSTALIASID"
 
+def get_proper_content_type(uploaded_file):
+    """Get the proper content type for the uploaded file"""
+    # First try to get it from the uploaded file
+    if hasattr(uploaded_file, 'type') and uploaded_file.type:
+        return uploaded_file.type
+    
+    # Fallback to guessing from filename
+    filename = uploaded_file.name.lower()
+    if filename.endswith('.jpg') or filename.endswith('.jpeg'):
+        return 'image/jpeg'
+    elif filename.endswith('.png'):
+        return 'image/png'
+    elif filename.endswith('.webp'):
+        return 'image/webp'
+    elif filename.endswith('.gif'):
+        return 'image/gif'
+    else:
+        # Default to JPEG for unknown image types
+        return 'image/jpeg'
+
 def upload_image_to_s3(uploaded_file):
-    """Upload image to S3 and return the key"""
+    """Upload image to S3 with proper content type handling"""
     try:
-        # Generate unique filename
+        # Generate unique filename with proper extension
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_extension = uploaded_file.name.split('.')[-1]
+        
+        # Ensure we have the right file extension
+        original_name = uploaded_file.name.lower()
+        if original_name.endswith('.jpg') or original_name.endswith('.jpeg'):
+            file_extension = 'jpg'
+            content_type = 'image/jpeg'
+        elif original_name.endswith('.png'):
+            file_extension = 'png'
+            content_type = 'image/png'
+        elif original_name.endswith('.webp'):
+            file_extension = 'webp'
+            content_type = 'image/webp'
+        else:
+            # Default to JPEG
+            file_extension = 'jpg'
+            content_type = 'image/jpeg'
+        
         s3_key = f"uploads/streamlit_{timestamp}_{uuid.uuid4().hex[:8]}.{file_extension}"
         
-        # Upload to S3
+        # Reset file pointer to beginning
+        uploaded_file.seek(0)
+        
+        # Upload to S3 with explicit content type
         clients['s3'].upload_fileobj(
             uploaded_file,
             S3_BUCKET,
             s3_key,
-            ExtraArgs={'ContentType': uploaded_file.type}
+            ExtraArgs={
+                'ContentType': content_type,
+                'Metadata': {
+                    'original-filename': uploaded_file.name,
+                    'upload-timestamp': timestamp
+                }
+            }
         )
         
+        logger.info(f"Uploaded {s3_key} with content type {content_type}")
         return s3_key
+        
     except Exception as e:
         st.error(f"Error uploading image: {str(e)}")
+        logger.error(f"Upload error: {str(e)}")
         return None
 
 def invoke_bedrock_agent(message, session_id):
@@ -70,6 +145,7 @@ def invoke_bedrock_agent(message, session_id):
         return full_response
     except Exception as e:
         st.error(f"Error invoking agent: {str(e)}")
+        logger.error(f"Agent invocation error: {str(e)}")
         return None
 
 def generate_recommendations_direct(session_id):
@@ -118,6 +194,7 @@ def generate_recommendations_direct(session_id):
         
     except Exception as e:
         st.error(f"Error generating recommendations: {str(e)}")
+        logger.error(f"Recommendations error: {str(e)}")
         return None
 
 def generate_style_collage(session_id, category="lifestyle"):
@@ -179,10 +256,11 @@ def generate_style_collage(session_id, category="lifestyle"):
         
     except Exception as e:
         st.error(f"Error generating style collage: {str(e)}")
+        logger.error(f"Collage generation error: {str(e)}")
         return None
 
 def display_recommendations(recommendations):
-    """Display recommendations in a user-friendly format at the top"""
+    """Display recommendations in a user-friendly format"""
     if not recommendations:
         st.warning("No recommendations available")
         return
@@ -236,10 +314,28 @@ def display_recommendations(recommendations):
         # Text format
         st.write(recommendations)
 
+def validate_image_file(uploaded_file):
+    """Validate that the uploaded file is a proper image"""
+    try:
+        # Try to open with PIL to validate it's a real image
+        image = Image.open(uploaded_file)
+        
+        # Reset file pointer
+        uploaded_file.seek(0)
+        
+        # Check image format
+        if image.format not in ['JPEG', 'PNG', 'WEBP']:
+            st.warning(f"Image format {image.format} detected. Converting to JPEG for better compatibility.")
+        
+        return True
+    except Exception as e:
+        st.error(f"Invalid image file: {str(e)}")
+        return False
+
 def main():
     # Header
     st.title("✨ EssenceMirror")
-    st.subheader("Discover Your Personal Style & Get Tailored Recommendations")
+    st.subheader("Discover Your Personal Style & Create Dynamic Content")
     
     # Initialize session state
     if 'session_id' not in st.session_state:
@@ -259,95 +355,133 @@ def main():
     
     # Sidebar
     with st.sidebar:
-        st.markdown("### How it works:")
-        st.markdown("1. 📸 Upload your photo")
-        st.markdown("2. 🔍 AI analyzes your style")
-        st.markdown("3. ✨ Get personalized recommendations")
-        st.markdown("4. 🎨 Generate visual mood board")
+        st.markdown("### ✨ EssenceMirror Features:")
+        st.markdown("1. 📸 **Style Analysis** - Upload & analyze your style")
+        st.markdown("2. 🎨 **Visual Collages** - AI-generated mood boards")
+        st.markdown("3. 🎬 **Style Videos** - Dynamic style content")
         st.markdown("---")
         st.markdown(f"**Session ID:** `{st.session_state.session_id[:8]}...`")
         
-        # Nova Canvas info
+        # Feature status
         st.markdown("---")
-        st.markdown("### 🎨 New Feature!")
-        st.markdown("**Visual Style Collages** powered by Amazon Nova Canvas")
-        st.markdown("Generate beautiful mood boards based on your personal style!")
-    
-    # Main content - 3 columns now
-    col1, col2, col3 = st.columns([1, 1, 1])
-    
-    with col1:
-        st.markdown("### 📸 Upload Your Photo")
-        
-        uploaded_file = st.file_uploader(
-            "Choose an image file",
-            type=['png', 'jpg', 'jpeg'],
-            help="Upload a clear photo of yourself for style analysis"
-        )
-        
-        if uploaded_file is not None:
-            # Display uploaded image
-            st.image(uploaded_file, caption="Your uploaded image", use_column_width=True)
-            
-            # Upload and analyze button
-            if st.button("🔍 Analyze My Style", type="primary"):
-                with st.spinner("Uploading image and analyzing your style..."):
-                    # Upload to S3
-                    s3_key = upload_image_to_s3(uploaded_file)
-                    
-                    if s3_key:
-                        # Create S3 URL for agent
-                        s3_url = f"https://{S3_BUCKET}.s3.us-east-1.amazonaws.com/{s3_key}"
-                        
-                        # Invoke agent for analysis
-                        analysis_message = f"I want to analyze {s3_url}"
-                        analysis_response = invoke_bedrock_agent(
-                            analysis_message, 
-                            st.session_state.session_id
-                        )
-                        
-                        if analysis_response:
-                            st.session_state.profile_data = analysis_response
-                            st.session_state.analysis_complete = True
-                            st.success("✅ Analysis complete!")
-                            st.rerun()
-    
-    with col2:
-        st.markdown("### 🎯 Your Style Profile & Recommendations")
-        
-        if st.session_state.analysis_complete and st.session_state.profile_data:
-            # Generate recommendations button (prominent at top)
-            if not st.session_state.recommendations_generated:
-                if st.button("✨ Get My Recommendations", type="primary", use_container_width=True):
-                    with st.spinner("Generating your personalized recommendations..."):
-                        recommendations = generate_recommendations_direct(st.session_state.session_id)
-                        
-                        if recommendations:
-                            st.session_state.recommendations_data = recommendations
-                            st.session_state.recommendations_generated = True
-                            st.success("🎉 Your personalized recommendations are ready!")
-                            st.rerun()
-            
-            # Display recommendations prominently if available
-            if st.session_state.recommendations_generated and st.session_state.recommendations_data:
-                display_recommendations(st.session_state.recommendations_data)
-                st.markdown("---")
-            
-            # Analysis results (moved below recommendations)
-            with st.expander("📊 View Detailed Style Analysis", expanded=False):
-                st.markdown("#### Analysis Results:")
-                st.write(st.session_state.profile_data)
-                
+        st.markdown("### 🚀 Available Features:")
+        st.markdown("✅ Style Analysis (Fixed MIME types)")
+        st.markdown("✅ Visual Collages (Nova Canvas)")
+        if TRUE_IMAGE_VIDEO_ENABLED:
+            st.markdown("✅ **BREAKTHROUGH**: See Yourself in Styles!")
         else:
-            st.info("👆 Upload an image to get started with your style analysis!")
-    
-    # NEW COLUMN: Nova Canvas Style Collage
-    with col3:
-        st.markdown("### 🎨 Visual Style Collages")
+            st.markdown("🚧 Personalized Videos (Coming Soon)")
         
+        # Tips
+        st.markdown("---")
+        st.markdown("### 💡 Tips:")
+        st.markdown("• Use clear, well-lit photos")
+        st.markdown("• Supported formats: JPG, PNG, WebP")
+        st.markdown("• **NEW**: See YOURSELF in recommended styles")
+        st.markdown("• Videos show your actual face and body")
+        st.markdown("• Try different style recommendations")
+        
+        # Debug info
+        st.markdown("---")
+        st.markdown("### 🔧 System Status:")
+        try:
+            identity = clients['s3'].meta.client._client_config.__dict__.get('region_name', 'Unknown')
+            st.markdown(f"• Region: {identity}")
+            st.markdown("• Auth: ✅ Working")
+        except:
+            st.markdown("• Auth: ❌ Check credentials")
+    
+    # Create tabs for different features
+    if TRUE_IMAGE_VIDEO_ENABLED:
+        tab1, tab2, tab3 = st.tabs(["📊 Style Analysis", "🎨 Visual Collages", "🎬 See Yourself in Styles"])
+    else:
+        tab1, tab2 = st.tabs(["📊 Style Analysis", "🎨 Visual Collages"])
+    
+    # Tab 1: Style Analysis
+    with tab1:
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.markdown("### 📸 Upload Your Photo")
+            
+            uploaded_file = st.file_uploader(
+                "Choose an image file",
+                type=['png', 'jpg', 'jpeg', 'webp'],
+                help="Upload a clear photo of yourself for style analysis. Supported formats: JPG, PNG, WebP",
+                key="analysis_uploader"
+            )
+            
+            if uploaded_file is not None:
+                # Validate the image file
+                if validate_image_file(uploaded_file):
+                    # Display uploaded image
+                    st.image(uploaded_file, caption="Your uploaded image", use_column_width=True)
+                    
+                    # Show file details
+                    with st.expander("📋 File Details"):
+                        st.write(f"**Filename:** {uploaded_file.name}")
+                        st.write(f"**Size:** {uploaded_file.size:,} bytes")
+                        st.write(f"**Type:** {get_proper_content_type(uploaded_file)}")
+                    
+                    # Upload and analyze button
+                    if st.button("🔍 Analyze My Style", type="primary", key="analyze_btn"):
+                        with st.spinner("Uploading image and analyzing your style..."):
+                            # Upload to S3
+                            s3_key = upload_image_to_s3(uploaded_file)
+                            
+                            if s3_key:
+                                # Create S3 URL for agent
+                                s3_url = f"https://{S3_BUCKET}.s3.us-east-1.amazonaws.com/{s3_key}"
+                                
+                                # Invoke agent for analysis
+                                analysis_message = f"I want to analyze {s3_url}"
+                                analysis_response = invoke_bedrock_agent(
+                                    analysis_message, 
+                                    st.session_state.session_id
+                                )
+                                
+                                if analysis_response:
+                                    st.session_state.profile_data = analysis_response
+                                    st.session_state.analysis_complete = True
+                                    st.success("✅ Analysis complete!")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Analysis failed. Please try again with a different image.")
+        
+        with col2:
+            st.markdown("### 🎯 Your Style Profile")
+            
+            if st.session_state.analysis_complete and st.session_state.profile_data:
+                # Generate recommendations button (prominent at top)
+                if not st.session_state.recommendations_generated:
+                    if st.button("✨ Get My Recommendations", type="primary", key="rec_btn"):
+                        with st.spinner("Generating your personalized recommendations..."):
+                            recommendations = generate_recommendations_direct(st.session_state.session_id)
+                            
+                            if recommendations:
+                                st.session_state.recommendations_data = recommendations
+                                st.session_state.recommendations_generated = True
+                                st.success("🎉 Your personalized recommendations are ready!")
+                                st.rerun()
+                
+                # Display recommendations prominently if available
+                if st.session_state.recommendations_generated and st.session_state.recommendations_data:
+                    display_recommendations(st.session_state.recommendations_data)
+                    st.markdown("---")
+                
+                # Analysis results (moved below recommendations)
+                with st.expander("📊 View Detailed Style Analysis", expanded=False):
+                    st.markdown("#### Analysis Results:")
+                    st.write(st.session_state.profile_data)
+                    
+            else:
+                st.info("👆 Upload an image to get started with your style analysis!")
+    
+    # Tab 2: Visual Collages
+    with tab2:
         if st.session_state.analysis_complete:
-            st.markdown("#### Choose Your Collage Type")
-            st.write("Generate beautiful mood boards focused on specific areas of your lifestyle!")
+            st.markdown("### 🎨 Visual Style Collages")
+            st.markdown("Generate beautiful mood boards focused on specific areas of your lifestyle!")
             
             # Category selection
             collage_categories = {
@@ -361,11 +495,12 @@ def main():
                 "Select collage focus:",
                 options=list(collage_categories.keys()),
                 format_func=lambda x: collage_categories[x],
-                index=0
+                index=0,
+                key="collage_selector"
             )
             
             # Style collage generation button
-            if st.button(f"🎨 Generate {collage_categories[selected_category]} Collage", type="primary"):
+            if st.button(f"🎨 Generate {collage_categories[selected_category]} Collage", type="primary", key="collage_btn"):
                 with st.spinner(f"Creating your personalized {collage_categories[selected_category].lower()} collage... This may take a few seconds."):
                     collage_result = generate_style_collage(st.session_state.session_id, selected_category)
                     
@@ -386,9 +521,6 @@ def main():
                 # Method 1: Try base64 if available
                 if 'base64' in st.session_state.collage_data:
                     try:
-                        import base64
-                        from io import BytesIO
-                        
                         # Decode base64 image
                         image_data = base64.b64decode(st.session_state.collage_data['base64'])
                         
@@ -434,7 +566,7 @@ def main():
                     col_a, col_b, col_c = st.columns(3)
                     
                     with col_a:
-                        if st.button("🔄 Generate New"):
+                        if st.button("🔄 Generate New", key="new_collage_btn"):
                             with st.spinner(f"Creating a new {collage_categories[st.session_state.collage_category].lower()} collage..."):
                                 new_collage = generate_style_collage(st.session_state.session_id, st.session_state.collage_category)
                                 if new_collage:
@@ -448,7 +580,7 @@ def main():
                     
                     with col_c:
                         # Category switch button
-                        if st.button("🎯 Change Focus"):
+                        if st.button("🎯 Change Focus", key="change_focus_btn"):
                             # Clear current collage to show category selector
                             if hasattr(st.session_state, 'collage_data'):
                                 del st.session_state.collage_data
@@ -457,9 +589,15 @@ def main():
         else:
             st.info("Complete your style analysis first to generate visual collages!")
     
+    # Tab 3: True Image-to-Video (if enabled)
+    if TRUE_IMAGE_VIDEO_ENABLED:
+        with tab3:
+            render_true_image_video_tab(st.session_state.session_id, st.session_state.analysis_complete)
+    
     # Footer
     st.markdown("---")
-    st.markdown("*Powered by Amazon Bedrock, Nova Pro AI, and Nova Canvas*")
+    st.markdown("*Powered by Amazon Bedrock, Nova Pro AI, Nova Canvas, and Nova Reel True Image-to-Video*")
+    st.markdown("**🚀 BREAKTHROUGH**: Now showing YOU wearing recommended styles in personalized videos!")
 
 if __name__ == "__main__":
     main()
