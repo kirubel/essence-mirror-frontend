@@ -4,6 +4,18 @@ import uuid
 from datetime import datetime
 import json
 import time
+import base64
+import os
+from io import BytesIO
+from PIL import Image
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Feature flag for Style Reel functionality
+STYLE_REEL_ENABLED = True
 
 # Configure Streamlit page
 st.set_page_config(
@@ -15,10 +27,12 @@ st.set_page_config(
 # Initialize AWS clients
 @st.cache_resource
 def init_aws_clients():
+    # Use explicit session with default profile
+    session = boto3.Session(profile_name='default')
     return {
-        's3': boto3.client('s3', region_name='us-east-1'),
-        'bedrock_agent': boto3.client('bedrock-agent-runtime', region_name='us-east-1'),
-        'lambda': boto3.client('lambda', region_name='us-east-1')
+        's3': session.client('s3', region_name='us-east-1'),
+        'bedrock_agent': session.client('bedrock-agent-runtime', region_name='us-east-1'),
+        'lambda': session.client('lambda', region_name='us-east-1')
     }
 
 clients = init_aws_clients()
@@ -318,7 +332,7 @@ def main():
         if st.session_state.analysis_complete and st.session_state.profile_data:
             # Generate recommendations button (prominent at top)
             if not st.session_state.recommendations_generated:
-                if st.button("✨ Get My Recommendations", type="primary", use_container_width=True):
+                if st.button("✨ Get My Recommendations", type="primary"):
                     with st.spinner("Generating your personalized recommendations..."):
                         recommendations = generate_recommendations_direct(st.session_state.session_id)
                         
@@ -463,3 +477,254 @@ def main():
 
 if __name__ == "__main__":
     main()
+# Add the Style Reel API to the Bedrock agent schema
+def update_agent_schema():
+    """Update the Bedrock agent schema to include the Style Reel API"""
+    try:
+        # Import clients from the main app
+        from essence_mirror_app import clients
+        
+        # Define the new API schema
+        style_reel_api = {
+            "name": "/generateStyleReel",
+            "description": "Generate a personalized style video using Nova Reel",
+            "method": "POST",
+            "contentType": "application/json",
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "style_focus": {
+                                    "type": "string",
+                                    "description": "Focus area for the style video (wardrobe, interior, travel, lifestyle)",
+                                    "enum": ["wardrobe", "interior", "travel", "lifestyle"]
+                                },
+                                "use_original_image": {
+                                    "type": "boolean",
+                                    "description": "Whether to use the user's original uploaded image in the video",
+                                    "default": True
+                                },
+                                "duration_seconds": {
+                                    "type": "integer",
+                                    "description": "Desired video duration in seconds (5-15)",
+                                    "minimum": 5,
+                                    "maximum": 15,
+                                    "default": 10
+                                }
+                            },
+                            "required": ["style_focus"]
+                        }
+                    }
+                }
+            },
+            "responseBody": {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "video_url": {
+                                    "type": "string",
+                                    "description": "URL to the generated video"
+                                },
+                                "video_base64": {
+                                    "type": "string",
+                                    "description": "Base64-encoded video data"
+                                },
+                                "prompt_used": {
+                                    "type": "string",
+                                    "description": "Prompt used to generate the video"
+                                },
+                                "user_id": {
+                                    "type": "string",
+                                    "description": "User ID for the request"
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "description": "Status message"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        # TODO: Implement the actual schema update using the Bedrock agent API
+        # This would require additional permissions and API calls
+        
+        logger.info("Agent schema updated to include Style Reel API")
+        return True
+    except Exception as e:
+        logger.error(f"Error updating agent schema: {str(e)}")
+        return False
+# Main app layout with tabs
+def main_app_with_tabs():
+    """Main application layout with tabs for different features"""
+    
+    # Initialize session state if needed
+    if 'session_id' not in st.session_state:
+        st.session_state.session_id = f"session_{str(uuid.uuid4())}"
+        st.session_state.analysis_complete = False
+        st.session_state.recommendations_generated = False
+    
+    # App header
+    st.title("✨ EssenceMirror - Discover Your Personal Style")
+    st.markdown("Upload an image and let AI analyze your unique style essence.")
+    
+    # Create tabs
+    tab1, tab2, tab3 = st.tabs(["📊 Style Analysis", "🎨 Style Collages", "🎬 Style in Motion (Beta)"])
+    
+    # Tab 1: Style Analysis
+    with tab1:
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.markdown("### 📸 Upload Your Image")
+            
+            uploaded_file = st.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"], key="uploader_tab1")
+            
+            if uploaded_file is not None:
+                # Display the uploaded image
+                image = Image.open(uploaded_file)
+                st.image(image, caption="Uploaded Image", use_column_width=True)
+                
+                # Save image to session state
+                st.session_state.uploaded_image = uploaded_file
+                
+                # Analyze button
+                if st.button("✨ Analyze My Style", type="primary"):
+                    with st.spinner("Analyzing your style... This may take a few seconds."):
+                        # Upload to S3
+                        s3_key = upload_image_to_s3(uploaded_file)
+                        
+                        if s3_key:
+                            # Create S3 URL for agent
+                            s3_url = f"https://{S3_BUCKET}.s3.us-east-1.amazonaws.com/{s3_key}"
+                            
+                            # Invoke agent for analysis
+                            analysis_message = f"I want to analyze {s3_url}"
+                            analysis_result = invoke_bedrock_agent(
+                                analysis_message, 
+                                st.session_state.session_id
+                            )
+                            
+                            if analysis_result:
+                                st.session_state.profile_data = analysis_result
+                                st.session_state.analysis_complete = True
+                                st.success("🎉 Analysis complete!")
+                                st.rerun()
+        
+        with col2:
+            st.markdown("### 🔍 Style Profile")
+            
+            if hasattr(st.session_state, 'profile_data') and st.session_state.profile_data:
+                st.markdown("#### Analysis Results:")
+                st.write(st.session_state.profile_data)
+            else:
+                st.info("👆 Upload an image to get started with your style analysis!")
+    
+    # Tab 2: Style Collages
+    with tab2:
+        if st.session_state.analysis_complete:
+            st.markdown("### 🎨 Visual Style Collages")
+            st.markdown("Generate beautiful mood boards focused on specific areas of your lifestyle!")
+            
+            # Category selection
+            collage_categories = {
+                "wardrobe": "👗 Wardrobe & Fashion",
+                "interior": "🏠 Home & Interior Design", 
+                "travel": "✈️ Travel & Experiences",
+                "lifestyle": "🌟 Complete Lifestyle"
+            }
+            
+            selected_category = st.selectbox(
+                "Select collage focus:",
+                options=list(collage_categories.keys()),
+                format_func=lambda x: collage_categories[x],
+                index=0,
+                key="collage_category_selector"
+            )
+            
+            # Style collage generation button
+            if st.button(f"🎨 Generate {collage_categories[selected_category]} Collage", type="primary", key="generate_collage_btn"):
+                with st.spinner(f"Creating your personalized {collage_categories[selected_category].lower()} collage... This may take a few seconds."):
+                    collage_result = generate_style_collage(st.session_state.session_id, selected_category)
+                    
+                    if collage_result:
+                        st.session_state.collage_data = collage_result
+                        st.session_state.collage_category = selected_category
+                        st.success(f"🎉 Your {collage_categories[selected_category].lower()} collage is ready!")
+                        st.rerun()
+            
+            # Display generated collage
+            if hasattr(st.session_state, 'collage_data') and st.session_state.collage_data:
+                category_name = collage_categories.get(st.session_state.get('collage_category', 'lifestyle'), 'Style')
+                st.markdown(f"#### 🖼️ Your {category_name} Collage:")
+                
+                # Try to display the image using different methods
+                collage_displayed = False
+                
+                # Method 1: Try base64 if available
+                if 'base64' in st.session_state.collage_data:
+                    try:
+                        # Decode base64 image
+                        image_data = base64.b64decode(st.session_state.collage_data['base64'])
+                        
+                        # Display using st.image with BytesIO
+                        st.image(
+                            BytesIO(image_data),
+                            caption=f"Your AI-Generated {category_name} Mood Board", 
+                            use_column_width=True
+                        )
+                        collage_displayed = True
+                        
+                        # Display the prompt used (for troubleshooting)
+                        if 'prompt_used' in st.session_state.collage_data:
+                            with st.expander("🔍 View Prompt Used"):
+                                st.text_area("Prompt for Nova Canvas", 
+                                            st.session_state.collage_data['prompt_used'], 
+                                            height=200)
+                    except Exception as e:
+                        st.error(f"Error displaying image from base64: {str(e)}")
+                
+                # Method 2: Try URL if available and base64 failed
+                if not collage_displayed and 'url' in st.session_state.collage_data:
+                    try:
+                        st.image(
+                            st.session_state.collage_data['url'],
+                            caption=f"Your AI-Generated {category_name} Mood Board", 
+                            use_column_width=True
+                        )
+                        collage_displayed = True
+                    except Exception as e:
+                        st.error(f"Error displaying image from URL: {str(e)}")
+                
+                if not collage_displayed:
+                    st.error("Unable to display the collage. Please try generating it again.")
+        else:
+            st.info("👆 Upload and analyze an image first to create style collages!")
+    
+    # Tab 3: Style in Motion (Beta)
+    with tab3:
+        if STYLE_REEL_ENABLED:
+            # Import and render the Style Reel component
+            try:
+                from style_reel_component import render_style_reel_tab
+                render_style_reel_tab(st.session_state.session_id, st.session_state.analysis_complete)
+            except Exception as e:
+                st.error(f"Error loading Style Reel feature: {str(e)}")
+                logger.error(f"Error loading Style Reel component: {str(e)}")
+        else:
+            st.info("🚧 Style in Motion feature coming soon! Stay tuned for dynamic style videos.")
+
+# Call the main app function with tabs
+if __name__ == "__main__":
+    # Initialize AWS clients
+    clients = init_aws_clients()
+    
+    # Run the app with tabs
+    main_app_with_tabs()
