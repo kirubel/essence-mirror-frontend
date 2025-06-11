@@ -26,25 +26,41 @@ logger = logging.getLogger(__name__)
 # Feature flag for True Image-to-Video functionality
 TRUE_IMAGE_VIDEO_ENABLED = True
 
-# Initialize AWS clients with explicit session (same as CLI)
+# Initialize AWS clients with environment-based credentials for production
 @st.cache_resource
 def init_aws_clients():
-    # Use explicit session with default profile (same as working CLI)
-    session = boto3.Session(profile_name='default')
-    
-    # Log the identity being used
     try:
+        # Try to use environment variables first (production)
+        session = boto3.Session()
+        
+        # Test if credentials are available
         sts_client = session.client('sts', region_name='us-east-1')
         identity = sts_client.get_caller_identity()
-        logger.info(f"Streamlit app initialized with identity: {identity['Arn']}")
+        logger.info(f"AWS credentials found - Account: {identity.get('Account', 'Unknown')}")
+        
+        return {
+            's3': session.client('s3', region_name='us-east-1'),
+            'bedrock_agent': session.client('bedrock-agent-runtime', region_name='us-east-1'),
+            'lambda': session.client('lambda', region_name='us-east-1')
+        }
     except Exception as e:
-        logger.warning(f"Could not get caller identity: {str(e)}")
-    
-    return {
-        's3': session.client('s3', region_name='us-east-1'),
-        'bedrock_agent': session.client('bedrock-agent-runtime', region_name='us-east-1'),
-        'lambda': session.client('lambda', region_name='us-east-1')
-    }
+        logger.error(f"AWS credentials not available: {str(e)}")
+        st.error("⚠️ AWS credentials not configured. Please set up AWS credentials in Streamlit Cloud secrets.")
+        st.info("""
+        **To fix this:**
+        1. Go to your Streamlit Cloud app settings
+        2. Add these secrets:
+           - `AWS_ACCESS_KEY_ID`
+           - `AWS_SECRET_ACCESS_KEY` 
+           - `AWS_DEFAULT_REGION` (set to 'us-east-1')
+        3. Redeploy the app
+        """)
+        # Return None clients to prevent further errors
+        return {
+            's3': None,
+            'bedrock_agent': None,
+            'lambda': None
+        }
 
 clients = init_aws_clients()
 
@@ -75,6 +91,10 @@ def get_proper_content_type(uploaded_file):
 
 def upload_image_to_s3(uploaded_file):
     """Upload image to S3 with proper content type handling"""
+    if not clients['s3']:
+        st.error("AWS S3 not available. Please configure AWS credentials.")
+        return None
+        
     try:
         # Generate unique filename with proper extension
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -124,6 +144,10 @@ def upload_image_to_s3(uploaded_file):
 
 def invoke_bedrock_agent(message, session_id):
     """Invoke the Bedrock agent with a message"""
+    if not clients['bedrock_agent']:
+        st.error("AWS Bedrock not available. Please configure AWS credentials.")
+        return None
+        
     try:
         response = clients['bedrock_agent'].invoke_agent(
             agentId=AGENT_ID,
@@ -148,6 +172,10 @@ def invoke_bedrock_agent(message, session_id):
 
 def generate_recommendations_direct(session_id):
     """Generate recommendations using Lambda function directly"""
+    if not clients['lambda']:
+        st.error("AWS Lambda not available. Please configure AWS credentials.")
+        return None
+        
     try:
         # Call Lambda function directly for better control
         recommendations_event = {
@@ -197,6 +225,10 @@ def generate_recommendations_direct(session_id):
 
 def generate_style_collage(session_id, category="lifestyle"):
     """Generate a category-specific style collage using Nova Canvas"""
+    if not clients['lambda']:
+        st.error("AWS Lambda not available. Please configure AWS credentials.")
+        return None
+        
     try:
         # Call the Lambda function directly for Nova Canvas
         test_event = {

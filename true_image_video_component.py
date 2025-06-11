@@ -43,8 +43,8 @@ def save_uploaded_file_temporarily(uploaded_file):
 def generate_personalized_recommendation_video(image_path, style_focus, specific_recommendations=None, user_id=None):
     """Generate a video showing the actual user wearing recommended styles"""
     try:
-        # Initialize the true image-to-video generator
-        generator = TrueImageToVideoGenerator(s3_bucket=S3_BUCKET)
+        # Initialize the true image-to-video generator with environment credentials
+        generator = TrueImageToVideoGenerator(s3_bucket=S3_BUCKET, profile_name=None)
         
         # Generate personalized video
         result = generator.generate_style_recommendation_video(
@@ -63,8 +63,8 @@ def generate_personalized_recommendation_video(image_path, style_focus, specific
 def check_video_status(job_info):
     """Check the status of a video generation job"""
     try:
-        # Initialize the generator for status checking
-        generator = TrueImageToVideoGenerator(s3_bucket=S3_BUCKET)
+        # Initialize the generator for status checking with environment credentials
+        generator = TrueImageToVideoGenerator(s3_bucket=S3_BUCKET, profile_name=None)
         
         # Check the status of the video generation job
         video_job_id = job_info["videoJobId"]
