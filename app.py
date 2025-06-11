@@ -1,4 +1,12 @@
 import streamlit as st
+
+# Configure Streamlit page - MUST BE FIRST
+st.set_page_config(
+    page_title="EssenceMirror - See Yourself in Recommended Styles!",
+    page_icon="✨",
+    layout="wide"
+)
+
 import boto3
 import uuid
 from datetime import datetime
@@ -11,22 +19,12 @@ from PIL import Image
 import logging
 import mimetypes
 
-# Import the true image-to-video component
-from true_image_video_component import render_true_image_video_tab
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Feature flag for True Image-to-Video functionality
 TRUE_IMAGE_VIDEO_ENABLED = True
-
-# Configure Streamlit page
-st.set_page_config(
-    page_title="EssenceMirror - See Yourself in Recommended Styles!",
-    page_icon="✨",
-    layout="wide"
-)
 
 # Initialize AWS clients with explicit session (same as CLI)
 @st.cache_resource
@@ -333,6 +331,14 @@ def validate_image_file(uploaded_file):
         return False
 
 def main():
+    # Import the component here to avoid early Streamlit calls
+    try:
+        from true_image_video_component import render_true_image_video_tab
+    except ImportError as e:
+        st.error(f"Error importing true image-to-video component: {str(e)}")
+        st.info("Some features may not be available.")
+        render_true_image_video_tab = None
+    
     # Header
     st.title("✨ EssenceMirror")
     st.subheader("Discover Your Personal Style & Create Dynamic Content")
@@ -592,7 +598,11 @@ def main():
     # Tab 3: True Image-to-Video (if enabled)
     if TRUE_IMAGE_VIDEO_ENABLED:
         with tab3:
-            render_true_image_video_tab(st.session_state.session_id, st.session_state.analysis_complete)
+            if render_true_image_video_tab:
+                render_true_image_video_tab(st.session_state.session_id, st.session_state.analysis_complete)
+            else:
+                st.error("True Image-to-Video component not available")
+                st.info("Please check the component installation and try again.")
     
     # Footer
     st.markdown("---")
