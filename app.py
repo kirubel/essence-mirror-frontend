@@ -371,6 +371,16 @@ def main():
         st.info("Some features may not be available.")
         render_true_image_video_tab = None
     
+    # Import Nova Sonic component
+    try:
+        from nova_sonic_component import render_nova_sonic_tab
+        nova_sonic_available = True
+    except ImportError as e:
+        st.error(f"Error importing Nova Sonic component: {str(e)}")
+        st.info("Voice conversation features may not be available.")
+        render_nova_sonic_tab = None
+        nova_sonic_available = False
+    
     # Header
     st.title("✨ EssenceMirror")
     st.subheader("Discover Your Personal Style & Create Dynamic Content")
@@ -430,10 +440,30 @@ def main():
             st.markdown("• Auth: ❌ Check credentials")
     
     # Create tabs for different features
-    if TRUE_IMAGE_VIDEO_ENABLED:
-        tab1, tab2, tab3 = st.tabs(["📊 Style Analysis", "🎨 Visual Collages", "🎬 See Yourself in Styles"])
+    if TRUE_IMAGE_VIDEO_ENABLED and nova_sonic_available:
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "📊 Style Analysis", 
+            "🎨 Visual Collages", 
+            "🎬 See Yourself in Styles",
+            "🎙️ Voice Style Consultant"
+        ])
+    elif TRUE_IMAGE_VIDEO_ENABLED:
+        tab1, tab2, tab3 = st.tabs([
+            "📊 Style Analysis", 
+            "🎨 Visual Collages", 
+            "🎬 See Yourself in Styles"
+        ])
+    elif nova_sonic_available:
+        tab1, tab2, tab3 = st.tabs([
+            "📊 Style Analysis", 
+            "🎨 Visual Collages", 
+            "🎙️ Voice Style Consultant"
+        ])
     else:
-        tab1, tab2 = st.tabs(["📊 Style Analysis", "🎨 Visual Collages"])
+        tab1, tab2 = st.tabs([
+            "📊 Style Analysis", 
+            "🎨 Visual Collages"
+        ])
     
     # Tab 1: Style Analysis
     with tab1:
@@ -636,10 +666,29 @@ def main():
                 st.error("True Image-to-Video component not available")
                 st.info("Please check the component installation and try again.")
     
+    # Tab 4: Nova Sonic Voice Consultant (if enabled and available)
+    if nova_sonic_available:
+        # Determine which tab to use based on available features
+        if TRUE_IMAGE_VIDEO_ENABLED:
+            nova_sonic_tab = tab4
+        else:
+            nova_sonic_tab = tab3
+        
+        with nova_sonic_tab:
+            if render_nova_sonic_tab:
+                render_nova_sonic_tab(
+                    session_id=st.session_state.session_id,
+                    analysis_complete=st.session_state.analysis_complete,
+                    style_analysis_data=st.session_state.get('analysis_result', None)
+                )
+            else:
+                st.error("Nova Sonic Voice Consultant not available")
+                st.info("Please check the Nova Sonic component installation and try again.")
+    
     # Footer
     st.markdown("---")
-    st.markdown("*Powered by Amazon Bedrock, Nova Pro AI, Nova Canvas, and Nova Reel True Image-to-Video*")
-    st.markdown("**🚀 BREAKTHROUGH**: Now showing YOU wearing recommended styles in personalized videos!")
+    st.markdown("*Powered by Amazon Bedrock, Nova Pro AI, Nova Canvas, Nova Reel, and Nova Sonic*")
+    st.markdown("**🚀 BREAKTHROUGH**: Complete AI Style Experience - Visual Analysis + True Image Videos + Voice Conversations!")
 
 if __name__ == "__main__":
     main()
