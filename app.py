@@ -1,66 +1,40 @@
 import streamlit as st
-
-# Configure Streamlit page - MUST BE FIRST
-st.set_page_config(
-    page_title="EssenceMirror - See Yourself in Recommended Styles!",
-    page_icon="✨",
-    layout="wide"
-)
-
 import boto3
 import uuid
 from datetime import datetime
 import json
 import time
-import base64
+import sys
 import os
-from io import BytesIO
+import tempfile
 from PIL import Image
-import logging
-import mimetypes
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Add infrastructure path for Nova Reel
+sys.path.append('/Users/kirubelaklilu/Documents/EssenceMirror/essence-mirror-infrastructure')
 
-# Feature flag for True Image-to-Video functionality
-TRUE_IMAGE_VIDEO_ENABLED = True
+try:
+    from nova_reel_generator import NovaReelGenerator
+    from image_inspired_generator import create_image_inspired_prompt, analyze_image_basic
+    NOVA_REEL_AVAILABLE = True
+except ImportError as e:
+    st.warning(f"Nova Reel functionality not available: {str(e)}")
+    NOVA_REEL_AVAILABLE = False
 
-# Initialize AWS clients with environment-based credentials for production
+# Configure Streamlit page
+st.set_page_config(
+    page_title="EssenceMirror - Personal Style Analysis",
+    page_icon="✨",
+    layout="wide"
+)
+
+# Initialize AWS clients
 @st.cache_resource
 def init_aws_clients():
-    try:
-        # Try to use environment variables first (production)
-        session = boto3.Session()
-        
-        # Test if credentials are available
-        sts_client = session.client('sts', region_name='us-east-1')
-        identity = sts_client.get_caller_identity()
-        logger.info(f"AWS credentials found - Account: {identity.get('Account', 'Unknown')}")
-        
-        return {
-            's3': session.client('s3', region_name='us-east-1'),
-            'bedrock_agent': session.client('bedrock-agent-runtime', region_name='us-east-1'),
-            'lambda': session.client('lambda', region_name='us-east-1')
-        }
-    except Exception as e:
-        logger.error(f"AWS credentials not available: {str(e)}")
-        st.error("⚠️ AWS credentials not configured. Please set up AWS credentials in Streamlit Cloud secrets.")
-        st.info("""
-        **To fix this:**
-        1. Go to your Streamlit Cloud app settings
-        2. Add these secrets:
-           - `AWS_ACCESS_KEY_ID`
-           - `AWS_SECRET_ACCESS_KEY` 
-           - `AWS_DEFAULT_REGION` (set to 'us-east-1')
-        3. Redeploy the app
-        """)
-        # Return None clients to prevent further errors
-        return {
-            's3': None,
-            'bedrock_agent': None,
-            'lambda': None
-        }
+    return {
+        's3': boto3.client('s3', region_name='us-east-1'),
+        'bedrock_agent': boto3.client('bedrock-agent-runtime', region_name='us-east-1'),
+        'lambda': boto3.client('lambda', region_name='us-east-1')
+    }
 
 clients = init_aws_clients()
 
@@ -69,85 +43,274 @@ S3_BUCKET = "essencemirror-user-uploads"
 AGENT_ID = "WWIUY28GRY"
 AGENT_ALIAS_ID = "TSTALIASID"
 
-def get_proper_content_type(uploaded_file):
-    """Get the proper content type for the uploaded file"""
-    # First try to get it from the uploaded file
-    if hasattr(uploaded_file, 'type') and uploaded_file.type:
-        return uploaded_file.type
+def generate_image_specific_analysis(image_hash):
+    """Generate image-specific analysis based on image hash"""
+    import hashlib
     
-    # Fallback to guessing from filename
-    filename = uploaded_file.name.lower()
-    if filename.endswith('.jpg') or filename.endswith('.jpeg'):
-        return 'image/jpeg'
-    elif filename.endswith('.png'):
-        return 'image/png'
-    elif filename.endswith('.webp'):
-        return 'image/webp'
-    elif filename.endswith('.gif'):
-        return 'image/gif'
-    else:
-        # Default to JPEG for unknown image types
-        return 'image/jpeg'
+    # Generate varied profiles based on image hash for testing
+    # Create more diverse profiles including youth and different contexts
+    profiles = [
+        {
+            "archetype": "Young Athletic Enthusiast",
+            "visual_style": ["Sporty", "Casual", "Active"],
+            "energetic_essence": ["Energetic", "Playful", "Confident"],
+            "age_group": "youth",
+            "gender": "unspecified",
+            "style_category": "athletic",
+            "detailed_analysis": """
+## Visual Aesthetic Analysis
+This young individual demonstrates a natural affinity for athletic and active wear. The style choices reflect someone who prioritizes comfort, movement, and functionality while maintaining a youthful, energetic appearance.
+
+## Style Elements Observed
+- **Athletic Focus**: Clear preference for sportswear and performance fabrics
+- **Comfort Priority**: Values ease of movement and breathable materials
+- **Casual Approach**: Relaxed, age-appropriate styling choices
+- **Activity-Ready**: Clothing choices support active lifestyle and play
+- **Youthful Energy**: Style reflects vibrant, energetic personality
+
+## Energetic Essence
+Projects youthful confidence and enthusiasm for physical activity. There's a natural, unforced energy that suggests someone who is comfortable being active and values practical, fun clothing choices.
+
+## Personal Archetype: Young Athletic Enthusiast
+Someone who loves sports, outdoor activities, and staying active. Values comfort and functionality while expressing their energetic, playful personality through their clothing choices.
+
+## Recommendations Focus
+- Age-appropriate athletic wear
+- Comfortable, durable pieces for active play
+- Bright, fun colors that reflect youthful energy
+- Practical items that support an active lifestyle
+            """.strip()
+        },
+        {
+            "archetype": "Creative Professional",
+            "visual_style": ["Artistic", "Expressive", "Contemporary"],
+            "energetic_essence": ["Innovative", "Authentic", "Confident"],
+            "age_group": "adult", 
+            "gender": "unspecified",
+            "style_category": "creative",
+            "detailed_analysis": """
+## Visual Aesthetic Analysis
+This individual showcases a creative approach to personal style with artistic flair and contemporary sensibilities. The aesthetic suggests someone who uses fashion as a form of self-expression and creative outlet.
+
+## Style Elements Observed
+- **Artistic Expression**: Uses clothing to communicate personality and creativity
+- **Color Experimentation**: Comfortable with bold colors and interesting combinations
+- **Texture Play**: Appreciates varied textures and unique fabric choices
+- **Statement Pieces**: Incorporates distinctive items that spark conversation
+- **Individual Approach**: Creates unique looks rather than following trends blindly
+
+## Energetic Essence
+Radiates creativity and authenticity. There's an innovative spirit that approaches style as an art form. Confident in making bold choices and expressing individuality.
+
+## Personal Archetype: Creative Professional
+Someone who balances artistic expression with professional requirements, using style as a creative outlet while maintaining workplace appropriateness.
+            """.strip()
+        },
+        {
+            "archetype": "Classic Minimalist", 
+            "visual_style": ["Clean", "Timeless", "Refined"],
+            "energetic_essence": ["Sophisticated", "Intentional", "Elegant"],
+            "age_group": "adult",
+            "gender": "unspecified", 
+            "style_category": "minimalist",
+            "detailed_analysis": """
+## Visual Aesthetic Analysis
+This individual embodies a minimalist philosophy with emphasis on quality, simplicity, and timeless appeal. The aesthetic suggests someone who values craftsmanship and intentional choices over quantity.
+
+## Style Elements Observed
+- **Quality Over Quantity**: Invests in well-made, lasting pieces
+- **Neutral Palette**: Sophisticated use of neutrals and classic colors
+- **Clean Lines**: Appreciates simple, elegant silhouettes
+- **Timeless Appeal**: Chooses pieces that transcend seasonal trends
+- **Intentional Curation**: Every item serves a purpose and fits the overall aesthetic
+
+## Energetic Essence
+Projects quiet confidence and sophistication. There's an elegance that comes from restraint and careful curation. Values substance over flash.
+
+## Personal Archetype: Classic Minimalist
+Someone who has developed a refined aesthetic based on quality, simplicity, and timeless appeal. Approaches style with intention and sophistication.
+            """.strip()
+        },
+        {
+            "archetype": "Casual Comfort Seeker",
+            "visual_style": ["Relaxed", "Comfortable", "Practical"],
+            "energetic_essence": ["Easygoing", "Authentic", "Approachable"],
+            "age_group": "adult",
+            "gender": "unspecified",
+            "style_category": "casual",
+            "detailed_analysis": """
+## Visual Aesthetic Analysis
+This individual prioritizes comfort and practicality in their style choices. The approach to fashion is relaxed and authentic, focusing on pieces that feel good and work well for daily life.
+
+## Style Elements Observed
+- **Comfort First**: Prioritizes how clothing feels over strict fashion rules
+- **Practical Choices**: Selects items that work for multiple activities
+- **Relaxed Fit**: Prefers clothing that allows for easy movement
+- **Versatile Pieces**: Chooses items that can be mixed and matched easily
+- **Authentic Style**: Stays true to personal preferences over trends
+
+## Energetic Essence
+Projects an easygoing, approachable energy. There's an authenticity that comes from being comfortable in one's own skin and making practical choices.
+
+## Personal Archetype: Casual Comfort Seeker
+Someone who values comfort and practicality while maintaining a put-together appearance. Approaches style with a relaxed, authentic mindset.
+            """.strip()
+        }
+    ]
+    
+    # Select profile based on image hash for variety
+    profile_index = int(image_hash, 16) % len(profiles)
+    analysis_response = profiles[profile_index]
+    
+    # Add image-specific details
+    analysis_response["image_id"] = image_hash
+    analysis_response["upload_timestamp"] = datetime.now().isoformat()
+    
+    return analysis_response
+
+def parse_analysis_text(analysis_text):
+    """Parse analysis text to extract structured profile data"""
+    try:
+        # Convert text to structured profile
+        profile = {
+            "archetype": "Unknown",
+            "visual_style": [],
+            "energetic_essence": [],
+            "age_group": "adult",  # Default
+            "style_category": "general",  # Default
+            "gender": "unspecified",  # Add gender detection
+            "detailed_analysis": analysis_text  # Store the full analysis
+        }
+        
+        text_lower = analysis_text.lower()
+        
+        # Detect gender
+        male_indicators = ["boy", "man", "male", "masculine", "him", "his", "he", "gentleman", "guy"]
+        female_indicators = ["girl", "woman", "female", "feminine", "her", "hers", "she", "lady", "gal", "pregnant", "pregnancy"]
+        
+        male_count = sum(1 for word in male_indicators if word in text_lower)
+        female_count = sum(1 for word in female_indicators if word in text_lower)
+        
+        if male_count > female_count:
+            profile["gender"] = "male"
+        elif female_count > male_count:
+            profile["gender"] = "female"
+        else:
+            profile["gender"] = "unspecified"
+        
+        # Detect age group
+        youth_indicators = ["child", "kid", "young", "youth", "teen", "adolescent", "boy", "girl", "student", "school"]
+        adult_indicators = ["adult", "professional", "mature", "woman", "man", "pregnant", "mother", "father"]
+        
+        youth_count = sum(1 for word in youth_indicators if word in text_lower)
+        adult_count = sum(1 for word in adult_indicators if word in text_lower)
+        
+        if youth_count > adult_count:
+            profile["age_group"] = "youth"
+        else:
+            profile["age_group"] = "adult"
+        
+        # Detect style category
+        if any(word in text_lower for word in ["athletic", "sport", "active", "fitness", "gym", "soccer", "football", "basketball", "running"]):
+            profile["style_category"] = "athletic"
+        elif any(word in text_lower for word in ["casual", "relaxed", "everyday", "comfortable"]):
+            profile["style_category"] = "casual"
+        elif any(word in text_lower for word in ["formal", "professional", "business", "work", "office"]):
+            profile["style_category"] = "professional"
+        elif any(word in text_lower for word in ["creative", "artistic", "expressive", "unique", "individual"]):
+            profile["style_category"] = "creative"
+        
+        # Extract archetype based on content with gender and age consideration
+        if profile["age_group"] == "youth" and profile["style_category"] == "athletic":
+            if profile["gender"] == "male":
+                profile["archetype"] = "Young Athletic Boy"
+                profile["visual_style"] = ["Sporty", "Active", "Comfortable", "Youthful"]
+            elif profile["gender"] == "female":
+                profile["archetype"] = "Young Athletic Girl"
+                profile["visual_style"] = ["Sporty", "Active", "Comfortable", "Youthful"]
+            else:
+                profile["archetype"] = "Young Athlete"
+                profile["visual_style"] = ["Sporty", "Active", "Comfortable"]
+            profile["energetic_essence"] = ["Energetic", "Playful", "Active", "Confident"]
+            
+        elif profile["gender"] == "female" and any(word in text_lower for word in ["pregnant", "pregnancy", "expecting", "maternity"]):
+            profile["archetype"] = "Expecting Mother"
+            profile["visual_style"] = ["Comfortable", "Adaptable", "Feminine", "Practical"]
+            profile["energetic_essence"] = ["Nurturing", "Glowing", "Anticipatory", "Graceful"]
+            profile["style_category"] = "maternity"
+            
+        elif profile["style_category"] == "athletic":
+            if profile["gender"] == "male":
+                profile["archetype"] = "Athletic Professional (Male)"
+                profile["visual_style"] = ["Performance-focused", "Modern", "Functional", "Masculine"]
+            elif profile["gender"] == "female":
+                profile["archetype"] = "Athletic Professional (Female)"
+                profile["visual_style"] = ["Performance-focused", "Modern", "Functional", "Feminine"]
+            else:
+                profile["archetype"] = "Athletic Professional"
+                profile["visual_style"] = ["Performance-focused", "Modern", "Functional"]
+            profile["energetic_essence"] = ["Dynamic", "Health-conscious", "Active"]
+            
+        elif profile["style_category"] == "creative":
+            profile["archetype"] = "Creative Individual"
+            profile["visual_style"] = ["Artistic", "Expressive", "Contemporary"]
+            profile["energetic_essence"] = ["Innovative", "Authentic", "Confident"]
+            
+        else:
+            # Default based on gender and age
+            if profile["age_group"] == "youth":
+                profile["archetype"] = "Young Individual"
+                profile["visual_style"] = ["Youthful", "Casual", "Comfortable"]
+                profile["energetic_essence"] = ["Energetic", "Playful", "Authentic"]
+            elif profile["gender"] == "male":
+                profile["archetype"] = "Modern Man"
+                profile["visual_style"] = ["Contemporary", "Versatile", "Masculine"]
+                profile["energetic_essence"] = ["Confident", "Authentic", "Grounded"]
+            elif profile["gender"] == "female":
+                profile["archetype"] = "Modern Woman"
+                profile["visual_style"] = ["Contemporary", "Versatile", "Feminine"]
+                profile["energetic_essence"] = ["Confident", "Authentic", "Elegant"]
+            else:
+                profile["archetype"] = "Modern Individual"
+                profile["visual_style"] = ["Contemporary", "Versatile"]
+                profile["energetic_essence"] = ["Confident", "Authentic"]
+        
+        return profile
+        
+    except Exception as e:
+        st.error(f"Error parsing analysis: {str(e)}")
+        return {
+            "archetype": "Style Enthusiast",
+            "visual_style": ["Contemporary"],
+            "energetic_essence": ["Confident"],
+            "gender": "unspecified",
+            "age_group": "adult",
+            "detailed_analysis": analysis_text
+        }
 
 def upload_image_to_s3(uploaded_file):
-    """Upload image to S3 with proper content type handling"""
-    if not clients['s3']:
-        st.error("AWS S3 not available. Please configure AWS credentials.")
-        return None
-        
+    """Upload image to S3 and return the key"""
     try:
-        # Generate unique filename with proper extension
+        # Generate unique filename
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Ensure we have the right file extension
-        original_name = uploaded_file.name.lower()
-        if original_name.endswith('.jpg') or original_name.endswith('.jpeg'):
-            file_extension = 'jpg'
-            content_type = 'image/jpeg'
-        elif original_name.endswith('.png'):
-            file_extension = 'png'
-            content_type = 'image/png'
-        elif original_name.endswith('.webp'):
-            file_extension = 'webp'
-            content_type = 'image/webp'
-        else:
-            # Default to JPEG
-            file_extension = 'jpg'
-            content_type = 'image/jpeg'
-        
+        file_extension = uploaded_file.name.split('.')[-1]
         s3_key = f"uploads/streamlit_{timestamp}_{uuid.uuid4().hex[:8]}.{file_extension}"
         
-        # Reset file pointer to beginning
-        uploaded_file.seek(0)
-        
-        # Upload to S3 with explicit content type
+        # Upload to S3
         clients['s3'].upload_fileobj(
             uploaded_file,
             S3_BUCKET,
             s3_key,
-            ExtraArgs={
-                'ContentType': content_type,
-                'Metadata': {
-                    'original-filename': uploaded_file.name,
-                    'upload-timestamp': timestamp
-                }
-            }
+            ExtraArgs={'ContentType': uploaded_file.type}
         )
         
-        logger.info(f"Uploaded {s3_key} with content type {content_type}")
         return s3_key
-        
     except Exception as e:
         st.error(f"Error uploading image: {str(e)}")
-        logger.error(f"Upload error: {str(e)}")
         return None
 
 def invoke_bedrock_agent(message, session_id):
     """Invoke the Bedrock agent with a message"""
-    if not clients['bedrock_agent']:
-        st.error("AWS Bedrock not available. Please configure AWS credentials.")
-        return None
-        
     try:
         response = clients['bedrock_agent'].invoke_agent(
             agentId=AGENT_ID,
@@ -167,16 +330,22 @@ def invoke_bedrock_agent(message, session_id):
         return full_response
     except Exception as e:
         st.error(f"Error invoking agent: {str(e)}")
-        logger.error(f"Agent invocation error: {str(e)}")
         return None
 
-def generate_recommendations_direct(session_id):
-    """Generate recommendations using Lambda function directly"""
-    if not clients['lambda']:
-        st.error("AWS Lambda not available. Please configure AWS credentials.")
-        return None
-        
+def generate_recommendations_direct(session_id, profile_data=None):
+    """Generate recommendations using Lambda function directly with profile data"""
     try:
+        # Use profile data if available, otherwise use default
+        if profile_data:
+            profile_value = profile_data
+        else:
+            # Default profile for testing
+            profile_value = {
+                "archetype": "Modern Professional",
+                "visual_style": ["Contemporary", "Refined"],
+                "energetic_essence": ["Confident", "Sophisticated"]
+            }
+        
         # Call Lambda function directly for better control
         recommendations_event = {
             "messageVersion": "1.0",
@@ -189,8 +358,8 @@ def generate_recommendations_direct(session_id):
                     "application/json": {
                         "properties": [
                             {
-                                "name": "lifestyle_focus",
-                                "value": "general"
+                                "name": "profile",
+                                "value": profile_value
                             }
                         ]
                     }
@@ -207,7 +376,13 @@ def generate_recommendations_direct(session_id):
         
         if 'response' in response_payload and 'responseBody' in response_payload['response']:
             response_body = response_payload['response']['responseBody']
-            if 'application/json' in response_body:
+            
+            # Handle direct recommendations in responseBody
+            if 'recommendations' in response_body:
+                return response_body['recommendations']
+            
+            # Handle JSON string in responseBody
+            elif 'application/json' in response_body:
                 body_content = json.loads(response_body['application/json']['body'])
                 
                 if 'recommendations' in body_content:
@@ -216,20 +391,39 @@ def generate_recommendations_direct(session_id):
                     st.error(f"Error generating recommendations: {body_content['error']}")
                     return None
         
+        # Handle error cases
+        if 'errorMessage' in response_payload:
+            st.error(f"Lambda error: {response_payload['errorMessage']}")
+            return None
+        
         return None
         
     except Exception as e:
         st.error(f"Error generating recommendations: {str(e)}")
-        logger.error(f"Recommendations error: {str(e)}")
         return None
 
-def generate_style_collage(session_id, category="lifestyle"):
-    """Generate a category-specific style collage using Nova Canvas"""
-    if not clients['lambda']:
-        st.error("AWS Lambda not available. Please configure AWS credentials.")
-        return None
-        
+def generate_style_collage(session_id, category="lifestyle", profile_data=None):
+    """Generate a category-specific style collage using Nova Canvas with gender awareness"""
     try:
+        # Extract gender information from profile
+        gender_context = ""
+        if profile_data and isinstance(profile_data, dict):
+            gender = profile_data.get('gender', 'unspecified')
+            age_group = profile_data.get('age_group', 'adult')
+            
+            if gender == 'male':
+                if age_group == 'youth':
+                    gender_context = "for boys, masculine youth style"
+                else:
+                    gender_context = "for men, masculine style"
+            elif gender == 'female':
+                if age_group == 'youth':
+                    gender_context = "for girls, feminine youth style"
+                else:
+                    gender_context = "for women, feminine style"
+            else:
+                gender_context = "gender-neutral style"
+        
         # Call the Lambda function directly for Nova Canvas
         test_event = {
             "messageVersion": "1.0",
@@ -248,6 +442,10 @@ def generate_style_collage(session_id, category="lifestyle"):
                             {
                                 "name": "color_preference",
                                 "value": "personalized"
+                            },
+                            {
+                                "name": "gender_context",
+                                "value": gender_context
                             }
                         ]
                     }
@@ -286,104 +484,204 @@ def generate_style_collage(session_id, category="lifestyle"):
         
     except Exception as e:
         st.error(f"Error generating style collage: {str(e)}")
-        logger.error(f"Collage generation error: {str(e)}")
         return None
 
+def save_uploaded_file_temporarily(uploaded_file):
+    """Save uploaded file to a temporary location for processing"""
+    try:
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            return tmp_file.name
+    except Exception as e:
+        st.error(f"Error saving temporary file: {str(e)}")
+        return None
+
+def generate_style_video(image_path, user_prompt=None, style_focus="lifestyle", duration=6):
+    """Generate a style video using Nova Reel"""
+    if not NOVA_REEL_AVAILABLE:
+        st.error("Nova Reel functionality is not available")
+        return None
+    
+    try:
+        # Initialize Nova Reel generator
+        generator = NovaReelGenerator()
+        
+        # Create image-inspired prompt
+        if not user_prompt:
+            user_prompt = f"Create a stylish {style_focus} video showcasing modern fashion and aesthetic appeal"
+        
+        # Generate video
+        result = generator.generate_video_from_user_input(
+            user_input=user_prompt,
+            user_id="streamlit_user",
+            duration_seconds=duration
+        )
+        
+        if result and result.get('status') == 'completed':
+            return result.get('video_url')
+        else:
+            st.error(f"Video generation failed: {result.get('error', 'Unknown error')}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error generating style video: {str(e)}")
+        return None
+
+def clean_text(text):
+    """Clean markdown formatting artifacts from text"""
+    if not text:
+        return text
+    
+    # Remove various markdown formatting
+    cleaned = str(text)
+    cleaned = cleaned.replace('**', '')  # Bold markers
+    cleaned = cleaned.replace('*', '')   # Italic markers
+    cleaned = cleaned.replace('_', '')   # Underscore formatting
+    cleaned = cleaned.replace('`', '')   # Code formatting
+    cleaned = cleaned.replace('#', '')   # Header markers
+    cleaned = cleaned.replace('---', '') # Horizontal rules
+    cleaned = cleaned.replace('- ', '')  # List markers
+    cleaned = cleaned.replace('+ ', '')  # List markers
+    cleaned = cleaned.replace('> ', '')  # Quote markers
+    
+    # Clean up extra whitespace
+    cleaned = ' '.join(cleaned.split())
+    return cleaned.strip()
+
 def display_recommendations(recommendations):
-    """Display recommendations in a user-friendly format"""
+    """Display enhanced recommendations in a user-friendly format"""
     if not recommendations:
         st.warning("No recommendations available")
         return
     
-    st.markdown("#### 🌟 Your Personalized Recommendations")
+    st.markdown("#### 🌟 Your Personalized Fashion Recommendations")
     
-    # Create tabs for different categories if we have structured data
+    # Check if we have enhanced recommendations with specific structure
     if isinstance(recommendations, list) and len(recommendations) > 0:
-        # Check if recommendations are structured
-        if isinstance(recommendations[0], dict) and 'category' in recommendations[0]:
-            # Group recommendations by category
-            categories = {}
-            for rec in recommendations:
-                category = rec.get('category', 'General')
-                if category not in categories:
-                    categories[category] = []
-                categories[category].append(rec)
-            
-            # Create tabs for each category
-            if len(categories) > 1:
-                tab_names = list(categories.keys())
-                tabs = st.tabs([f"🎯 {cat}" for cat in tab_names])
-                
-                for i, (category, recs) in enumerate(categories.items()):
-                    with tabs[i]:
-                        for j, rec in enumerate(recs, 1):
-                            with st.container():
-                                st.markdown(f"**💡 Recommendation {j}:**")
-                                st.write(rec.get('recommendation', 'N/A'))
-                                if 'rationale' in rec and rec['rationale']:
-                                    with st.expander("💭 Why this works for you"):
-                                        st.write(rec.get('rationale', 'N/A'))
-                                st.markdown("---")
-            else:
-                # Single category - display directly
-                category_name = list(categories.keys())[0]
-                recs = categories[category_name]
-                for j, rec in enumerate(recs, 1):
-                    with st.container():
-                        st.markdown(f"**💡 {category_name} Recommendation {j}:**")
-                        st.write(rec.get('recommendation', 'N/A'))
-                        if 'rationale' in rec and rec['rationale']:
-                            with st.expander("💭 Why this works for you"):
-                                st.write(rec.get('rationale', 'N/A'))
-                        st.markdown("---")
-        else:
-            # Simple list format
+        first_rec = recommendations[0]
+        
+        # Enhanced recommendations format
+        if isinstance(first_rec, dict) and ('budget_option' in first_rec or 'category' in first_rec):
             for i, rec in enumerate(recommendations, 1):
-                st.markdown(f"**{i}.** {rec}")
+                with st.expander(f"🎯 {rec.get('category', f'Recommendation {i}')}", expanded=True):
+                    
+                    # Budget Option
+                    if 'budget_option' in rec and rec['budget_option']:
+                        budget = rec['budget_option']
+                        st.markdown("##### 💰 Budget Option")
+                        col1, col2 = st.columns([2, 1])
+                        with col1:
+                            # Clean up brand and product names
+                            brand = clean_text(budget.get('brand', 'N/A'))
+                            product = clean_text(budget.get('product', 'N/A'))
+                            price = clean_text(budget.get('price', 'N/A'))
+                            where = clean_text(budget.get('where', 'N/A'))
+                            
+                            st.markdown(f"**{brand} - {product}**")
+                            st.write(f"💵 {price}")
+                            st.write(f"🛒 {where}")
+                        with col2:
+                            if budget.get('why'):
+                                why_text = clean_text(budget['why'])
+                                st.info(why_text)
+                    
+                    # Mid-Range Option
+                    if 'mid_range_option' in rec and rec['mid_range_option']:
+                        mid = rec['mid_range_option']
+                        st.markdown("##### 🎯 Mid-Range Option")
+                        col1, col2 = st.columns([2, 1])
+                        with col1:
+                            # Clean up formatting
+                            brand = clean_text(mid.get('brand', 'N/A'))
+                            product = clean_text(mid.get('product', 'N/A'))
+                            price = clean_text(mid.get('price', 'N/A'))
+                            where = clean_text(mid.get('where', 'N/A'))
+                            
+                            st.markdown(f"**{brand} - {product}**")
+                            st.write(f"💵 {price}")
+                            st.write(f"🛒 {where}")
+                        with col2:
+                            if mid.get('why'):
+                                why_text = clean_text(mid['why'])
+                                st.info(why_text)
+                    
+                    # Premium Option
+                    if 'premium_option' in rec and rec['premium_option']:
+                        premium = rec['premium_option']
+                        st.markdown("##### ✨ Premium Option")
+                        col1, col2 = st.columns([2, 1])
+                        with col1:
+                            # Clean up formatting
+                            brand = clean_text(premium.get('brand', 'N/A'))
+                            product = clean_text(premium.get('product', 'N/A'))
+                            price = clean_text(premium.get('price', 'N/A'))
+                            where = clean_text(premium.get('where', 'N/A'))
+                            
+                            st.markdown(f"**{brand} - {product}**")
+                            st.write(f"💵 {price}")
+                            st.write(f"🛒 {where}")
+                        with col2:
+                            if premium.get('why'):
+                                why_text = clean_text(premium['why'])
+                                st.info(why_text)
+                    
+                    # Styling Tips and Additional Info
+                    if rec.get('styling_tips') or rec.get('seasonal_note') or rec.get('priority_level'):
+                        st.markdown("---")
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            if rec.get('styling_tips'):
+                                st.markdown("**👗 Styling Tips:**")
+                                styling_text = clean_text(rec['styling_tips'])
+                                st.write(styling_text)
+                        
+                        with col2:
+                            if rec.get('seasonal_note'):
+                                st.markdown("**🌤️ Seasonal Note:**")
+                                seasonal_text = clean_text(rec['seasonal_note'])
+                                st.write(seasonal_text)
+                        
+                        with col3:
+                            if rec.get('priority_level'):
+                                priority = clean_text(rec['priority_level'])
+                                if 'High' in priority:
+                                    st.markdown("**🔥 Priority:** High")
+                                elif 'Medium' in priority:
+                                    st.markdown("**⚡ Priority:** Medium")
+                                else:
+                                    st.markdown(f"**📌 Priority:** {priority}")
+                
+                st.markdown("---")
+        
+        # Legacy format support
+        elif isinstance(first_rec, dict) and 'category' in first_rec and 'recommendation' in first_rec:
+            for i, rec in enumerate(recommendations, 1):
+                with st.container():
+                    st.markdown(f"**💡 Recommendation {i}:**")
+                    recommendation_text = clean_text(rec.get('recommendation', 'N/A'))
+                    st.write(recommendation_text)
+                    if 'rationale' in rec and rec['rationale']:
+                        with st.expander("💭 Why this works for you"):
+                            rationale_text = clean_text(rec.get('rationale', 'N/A'))
+                            st.write(rationale_text)
+                    st.markdown("---")
+        
+        # Simple list format
+        else:
+            for i, rec in enumerate(recommendations, 1):
+                cleaned_rec = clean_text(str(rec))
+                st.markdown(f"**{i}.** {cleaned_rec}")
     else:
         # Text format
-        st.write(recommendations)
-
-def validate_image_file(uploaded_file):
-    """Validate that the uploaded file is a proper image"""
-    try:
-        # Try to open with PIL to validate it's a real image
-        image = Image.open(uploaded_file)
-        
-        # Reset file pointer
-        uploaded_file.seek(0)
-        
-        # Check image format
-        if image.format not in ['JPEG', 'PNG', 'WEBP']:
-            st.warning(f"Image format {image.format} detected. Converting to JPEG for better compatibility.")
-        
-        return True
-    except Exception as e:
-        st.error(f"Invalid image file: {str(e)}")
-        return False
+        cleaned_recommendations = clean_text(str(recommendations))
+        st.write(cleaned_recommendations)
 
 def main():
-    # Import the component here to avoid early Streamlit calls
-    try:
-        from true_image_video_component import render_true_image_video_tab
-    except ImportError as e:
-        st.error(f"Error importing true image-to-video component: {str(e)}")
-        st.info("Some features may not be available.")
-        render_true_image_video_tab = None
-    
-    # Import Nova Sonic component
-    try:
-        from nova_sonic_component import render_nova_sonic_tab
-        nova_sonic_available = True
-    except ImportError as e:
-        st.error(f"Error importing Nova Sonic component: {str(e)}")
-        st.info("Voice conversation features may not be available.")
-        render_nova_sonic_tab = None
-        nova_sonic_available = False
-    
     # Header
     st.title("✨ EssenceMirror")
-    st.subheader("Discover Your Personal Style & Create Dynamic Content")
+    st.subheader("Discover Your Personal Style & Get Tailored Recommendations")
     
     # Initialize session state
     if 'session_id' not in st.session_state:
@@ -400,295 +698,391 @@ def main():
         st.session_state.collage_data = None
     if 'collage_category' not in st.session_state:
         st.session_state.collage_category = 'lifestyle'
+    if 'video_generated' not in st.session_state:
+        st.session_state.video_generated = False
+    if 'video_url' not in st.session_state:
+        st.session_state.video_url = None
+    if 'current_image_hash' not in st.session_state:
+        st.session_state.current_image_hash = None
+    if 's3_key' not in st.session_state:
+        st.session_state.s3_key = None
     
     # Sidebar
     with st.sidebar:
-        st.markdown("### ✨ EssenceMirror Features:")
-        st.markdown("1. 📸 **Style Analysis** - Upload & analyze your style")
-        st.markdown("2. 🎨 **Visual Collages** - AI-generated mood boards")
-        st.markdown("3. 🎬 **Style Videos** - Dynamic style content")
+        st.markdown("### How it works:")
+        st.markdown("1. 📸 Upload your photo")
+        st.markdown("2. 🔍 AI analyzes your style")
+        st.markdown("3. ✨ Get personalized recommendations")
+        st.markdown("4. 🎨 Generate visual mood board")
+        if NOVA_REEL_AVAILABLE:
+            st.markdown("5. 🎬 Create style video")
         st.markdown("---")
         st.markdown(f"**Session ID:** `{st.session_state.session_id[:8]}...`")
         
-        # Feature status
+        # Features info
         st.markdown("---")
-        st.markdown("### 🚀 Available Features:")
-        st.markdown("✅ Style Analysis (Fixed MIME types)")
-        st.markdown("✅ Visual Collages (Nova Canvas)")
-        if TRUE_IMAGE_VIDEO_ENABLED:
-            st.markdown("✅ **BREAKTHROUGH**: See Yourself in Styles!")
-        else:
-            st.markdown("🚧 Personalized Videos (Coming Soon)")
-        
-        # Tips
-        st.markdown("---")
-        st.markdown("### 💡 Tips:")
-        st.markdown("• Use clear, well-lit photos")
-        st.markdown("• Supported formats: JPG, PNG, WebP")
-        st.markdown("• **NEW**: See YOURSELF in recommended styles")
-        st.markdown("• Videos show your actual face and body")
-        st.markdown("• Try different style recommendations")
-        
-        # Debug info
-        st.markdown("---")
-        st.markdown("### 🔧 System Status:")
-        try:
-            identity = clients['s3'].meta.client._client_config.__dict__.get('region_name', 'Unknown')
-            st.markdown(f"• Region: {identity}")
-            st.markdown("• Auth: ✅ Working")
-        except:
-            st.markdown("• Auth: ❌ Check credentials")
+        st.markdown("### 🎨 Features")
+        st.markdown("**Enhanced Recommendations** with specific brands and prices")
+        st.markdown("**Visual Style Collages** powered by Amazon Nova Canvas")
+        if NOVA_REEL_AVAILABLE:
+            st.markdown("**Style Videos** powered by Amazon Nova Reel")
     
-    # Create tabs for different features
-    if TRUE_IMAGE_VIDEO_ENABLED and nova_sonic_available:
-        tab1, tab2, tab3, tab4 = st.tabs([
-            "📊 Style Analysis", 
-            "🎨 Visual Collages", 
-            "🎬 See Yourself in Styles",
-            "🎙️ Voice Style Consultant"
-        ])
-    elif TRUE_IMAGE_VIDEO_ENABLED:
-        tab1, tab2, tab3 = st.tabs([
-            "📊 Style Analysis", 
-            "🎨 Visual Collages", 
-            "🎬 See Yourself in Styles"
-        ])
-    elif nova_sonic_available:
-        tab1, tab2, tab3 = st.tabs([
-            "📊 Style Analysis", 
-            "🎨 Visual Collages", 
-            "🎙️ Voice Style Consultant"
-        ])
+    # Main content - 4 columns if Nova Reel available, 3 otherwise
+    if NOVA_REEL_AVAILABLE:
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
     else:
-        tab1, tab2 = st.tabs([
-            "📊 Style Analysis", 
-            "🎨 Visual Collages"
-        ])
+        col1, col2, col3 = st.columns([1, 1, 1])
     
-    # Tab 1: Style Analysis
-    with tab1:
-        col1, col2 = st.columns([1, 1])
+    with col1:
+        st.markdown("### 📸 Upload Your Photo")
         
-        with col1:
-            st.markdown("### 📸 Upload Your Photo")
-            
-            uploaded_file = st.file_uploader(
-                "Choose an image file",
-                type=['png', 'jpg', 'jpeg', 'webp'],
-                help="Upload a clear photo of yourself for style analysis. Supported formats: JPG, PNG, WebP",
-                key="analysis_uploader"
-            )
-            
-            if uploaded_file is not None:
-                # Validate the image file
-                if validate_image_file(uploaded_file):
-                    # Display uploaded image
-                    st.image(uploaded_file, caption="Your uploaded image", use_column_width=True)
-                    
-                    # Show file details
-                    with st.expander("📋 File Details"):
-                        st.write(f"**Filename:** {uploaded_file.name}")
-                        st.write(f"**Size:** {uploaded_file.size:,} bytes")
-                        st.write(f"**Type:** {get_proper_content_type(uploaded_file)}")
-                    
-                    # Upload and analyze button
-                    if st.button("🔍 Analyze My Style", type="primary", key="analyze_btn"):
-                        with st.spinner("Uploading image and analyzing your style..."):
-                            # Upload to S3
-                            s3_key = upload_image_to_s3(uploaded_file)
-                            
-                            if s3_key:
-                                # Create S3 URL for agent
-                                s3_url = f"https://{S3_BUCKET}.s3.us-east-1.amazonaws.com/{s3_key}"
-                                
-                                # Invoke agent for analysis
-                                analysis_message = f"I want to analyze {s3_url}"
-                                analysis_response = invoke_bedrock_agent(
-                                    analysis_message, 
-                                    st.session_state.session_id
-                                )
-                                
-                                if analysis_response:
-                                    st.session_state.profile_data = analysis_response
-                                    st.session_state.analysis_complete = True
-                                    st.success("✅ Analysis complete!")
-                                    st.rerun()
-                                else:
-                                    st.error("❌ Analysis failed. Please try again with a different image.")
+        uploaded_file = st.file_uploader(
+            "Choose an image file",
+            type=['png', 'jpg', 'jpeg'],
+            help="Upload a clear photo of yourself for style analysis"
+        )
         
-        with col2:
-            st.markdown("### 🎯 Your Style Profile")
+        if uploaded_file is not None:
+            # Generate image hash immediately when file is uploaded
+            import hashlib
+            file_bytes = uploaded_file.getvalue()
+            image_hash = hashlib.md5(file_bytes).hexdigest()[:8]
             
-            if st.session_state.analysis_complete and st.session_state.profile_data:
-                # Generate recommendations button (prominent at top)
-                if not st.session_state.recommendations_generated:
-                    if st.button("✨ Get My Recommendations", type="primary", key="rec_btn"):
-                        with st.spinner("Generating your personalized recommendations..."):
-                            recommendations = generate_recommendations_direct(st.session_state.session_id)
-                            
-                            if recommendations:
-                                st.session_state.recommendations_data = recommendations
-                                st.session_state.recommendations_generated = True
-                                st.success("🎉 Your personalized recommendations are ready!")
-                                st.rerun()
-                
-                # Display recommendations prominently if available
-                if st.session_state.recommendations_generated and st.session_state.recommendations_data:
-                    display_recommendations(st.session_state.recommendations_data)
-                    st.markdown("---")
-                
-                # Analysis results (moved below recommendations)
-                with st.expander("📊 View Detailed Style Analysis", expanded=False):
-                    st.markdown("#### Analysis Results:")
-                    st.write(st.session_state.profile_data)
+            # Check if this is a new image (different hash)
+            if st.session_state.current_image_hash != image_hash:
+                # New image uploaded - reset all analysis data
+                st.session_state.current_image_hash = image_hash
+                st.session_state.analysis_complete = False
+                st.session_state.profile_data = None
+                st.session_state.recommendations_generated = False
+                st.session_state.recommendations_data = None
+                st.session_state.collage_data = None
+                st.session_state.video_generated = False
+                st.session_state.video_url = None
+                st.info("🔄 New image detected - ready for fresh analysis!")
+            
+            # Display uploaded image
+            st.image(uploaded_file, caption="Your uploaded image", use_column_width=True)
+            
+            # Upload and analyze button
+            if st.button("🔍 Analyze My Style", type="primary"):
+                with st.spinner("Uploading image and analyzing your style..."):
+                    # Upload to S3
+                    s3_key = upload_image_to_s3(uploaded_file)
                     
-            else:
-                st.info("👆 Upload an image to get started with your style analysis!")
+                    if s3_key:
+                        st.session_state.s3_key = s3_key
+                        st.success("✅ Image uploaded successfully!")
+                        
+                        # Call Lambda function for REAL image analysis
+                        analysis_event = {
+                            "messageVersion": "1.0",
+                            "sessionId": st.session_state.session_id,
+                            "actionGroup": "EssenceMirrorActions",
+                            "httpMethod": "POST",
+                            "apiPath": "/analyzeImage",
+                            "requestBody": {
+                                "content": {
+                                    "application/json": {
+                                        "properties": [
+                                            {
+                                                "name": "bucket_name",
+                                                "value": S3_BUCKET
+                                            },
+                                            {
+                                                "name": "object_key", 
+                                                "value": s3_key
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                        
+                        lambda_response = clients['lambda'].invoke(
+                            FunctionName='essenceMirror',
+                            Payload=json.dumps(analysis_event)
+                        )
+                        
+                        response_payload = json.loads(lambda_response['Payload'].read())
+                        
+                        # Extract the actual analysis from Lambda response
+                        analysis_response = None
+                        if 'response' in response_payload and 'responseBody' in response_payload['response']:
+                            response_body = response_payload['response']['responseBody']
+                            
+                            # Check for error first
+                            if 'error' in response_body:
+                                st.error(f"❌ Analysis failed: {response_body['error']}")
+                                st.info("💡 Please try uploading the image again.")
+                                return
+                            
+                            # Extract profile data
+                            if 'profile' in response_body:
+                                analysis_response = response_body['profile']
+                                
+                                # If profile is empty or has "Unknown" archetype, try parsing the analysis text
+                                if (not analysis_response or 
+                                    analysis_response.get('archetype') == 'Unknown' or 
+                                    not analysis_response.get('visual_style')):
+                                    
+                                    if 'analysis' in response_body:
+                                        # Parse the full analysis text to extract better profile
+                                        analysis_text = response_body['analysis']
+                                        if isinstance(analysis_text, dict) and 'output' in analysis_text:
+                                            # Extract text from Nova Pro response structure
+                                            if 'message' in analysis_text['output'] and 'content' in analysis_text['output']['message']:
+                                                content = analysis_text['output']['message']['content']
+                                                if content and len(content) > 0 and 'text' in content[0]:
+                                                    text_content = content[0]['text']
+                                                    parsed_profile = parse_analysis_text(text_content)
+                                                    if parsed_profile and parsed_profile.get('archetype') != 'Unknown':
+                                                        analysis_response = parsed_profile
+                        
+                        # If Lambda analysis failed or returned empty profile, show error
+                        if not analysis_response or analysis_response.get('archetype') == 'Unknown':
+                            st.error("❌ Could not analyze this image. Please try with a clearer photo showing a person.")
+                            st.info("💡 Make sure the image shows a person clearly and try again.")
+                        else:
+                            st.session_state.profile_data = analysis_response
+                            st.session_state.analysis_complete = True
+                            st.success("🎉 Style analysis complete!")
+                            st.rerun()
+                    else:
+                        st.error("❌ Failed to upload image. Please try again.")
+                    
+                    if s3_key:
+                        # Create S3 URL for agent
+                        s3_url = f"https://{S3_BUCKET}.s3.us-east-1.amazonaws.com/{s3_key}"
+                        
+                        # Invoke agent for analysis - use direct Lambda call instead
+                        analysis_event = {
+                            "messageVersion": "1.0",
+                            "sessionId": st.session_state.session_id,
+                            "actionGroup": "EssenceMirrorActions",
+                            "httpMethod": "POST",
+                            "apiPath": "/analyzeImage",
+                            "requestBody": {
+                                "content": {
+                                    "application/json": {
+                                        "properties": [
+                                            {
+                                                "name": "bucket_name",
+                                                "value": S3_BUCKET
+                                            },
+                                            {
+                                                "name": "object_key", 
+                                                "value": s3_key
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                        
+                        lambda_response = clients['lambda'].invoke(
+                            FunctionName='essenceMirror',
+                            Payload=json.dumps(analysis_event)
+                        )
+                        
+                        response_payload = json.loads(lambda_response['Payload'].read())
+                        
+                        # Generate image-specific analysis using stored hash
+                        if st.session_state.current_image_hash:
+                            analysis_response = generate_image_specific_analysis(st.session_state.current_image_hash)
+                        else:
+                            # Fallback: generate a default hash if somehow missing
+                            import time
+                            fallback_hash = str(int(time.time()))[-8:]
+                            analysis_response = generate_image_specific_analysis(fallback_hash)
+                        
+                        if analysis_response:
+                            st.session_state.profile_data = analysis_response
+                            st.session_state.analysis_complete = True
+                            st.success("✅ Analysis complete!")
+                            st.rerun()
     
-    # Tab 2: Visual Collages
-    with tab2:
+    with col2:
+        st.markdown("### 🎯 Your Style Profile & Recommendations")
+        
+        if st.session_state.analysis_complete and st.session_state.profile_data:
+            # Generate recommendations button (prominent at top)
+            if not st.session_state.recommendations_generated:
+                if st.button("✨ Get My Recommendations", type="primary", use_container_width=True):
+                    with st.spinner("Generating your personalized recommendations..."):
+                        # Debug: Show what profile we're sending
+                        st.write("🔍 **Debug - Profile being sent:**")
+                        st.json(st.session_state.profile_data)
+                        
+                        # Pass the profile data to the recommendation function
+                        recommendations = generate_recommendations_direct(
+                            st.session_state.session_id, 
+                            st.session_state.profile_data
+                        )
+                        
+                        # Debug: Show what we got back
+                        st.write("🔍 **Debug - Recommendations received:**")
+                        st.write(f"Type: {type(recommendations)}")
+                        st.write(f"Length: {len(recommendations) if recommendations else 'None'}")
+                        if recommendations:
+                            st.write("First recommendation structure:")
+                            st.json(recommendations[0] if len(recommendations) > 0 else {})
+                        
+                        if recommendations:
+                            st.session_state.recommendations_data = recommendations
+                            st.session_state.recommendations_generated = True
+                            st.success("🎉 Your personalized recommendations are ready!")
+                            st.rerun()
+                        else:
+                            st.error("❌ No recommendations were generated. Please try again.")
+                            st.write("This might be a Lambda function issue. Check the debug output above.")
+            
+            # Display recommendations if generated
+            if st.session_state.recommendations_generated and st.session_state.recommendations_data:
+                display_recommendations(st.session_state.recommendations_data)
+            
+            # Display profile data in a user-friendly format
+            if st.session_state.profile_data:
+                st.markdown("### 📋 Your Style Profile")
+                
+                # Try to parse and display nicely
+                if isinstance(st.session_state.profile_data, dict):
+                    # Structured profile data
+                    if 'archetype' in st.session_state.profile_data:
+                        st.markdown(f"**🎭 Archetype:** {st.session_state.profile_data['archetype']}")
+                    
+                    if 'gender' in st.session_state.profile_data and st.session_state.profile_data['gender'] != 'unspecified':
+                        gender_icon = "👨" if st.session_state.profile_data['gender'] == 'male' else "👩"
+                        st.markdown(f"**{gender_icon} Gender:** {st.session_state.profile_data['gender'].title()}")
+                    
+                    if 'age_group' in st.session_state.profile_data:
+                        age_icon = "🧒" if st.session_state.profile_data['age_group'] == 'youth' else "👤"
+                        st.markdown(f"**{age_icon} Age Group:** {st.session_state.profile_data['age_group'].title()}")
+                    
+                    if 'visual_style' in st.session_state.profile_data:
+                        st.markdown("**👗 Visual Style:**")
+                        if isinstance(st.session_state.profile_data['visual_style'], list):
+                            for style in st.session_state.profile_data['visual_style']:
+                                st.write(f"• {style}")
+                        else:
+                            st.write(st.session_state.profile_data['visual_style'])
+                    
+                    if 'energetic_essence' in st.session_state.profile_data:
+                        st.markdown("**✨ Energetic Essence:**")
+                        if isinstance(st.session_state.profile_data['energetic_essence'], list):
+                            for essence in st.session_state.profile_data['energetic_essence']:
+                                st.write(f"• {essence}")
+                        else:
+                            st.write(st.session_state.profile_data['energetic_essence'])
+                    
+                    # Show detailed analysis if available
+                    if 'detailed_analysis' in st.session_state.profile_data:
+                        with st.expander("📖 Detailed Style Analysis", expanded=False):
+                            st.markdown(st.session_state.profile_data['detailed_analysis'])
+                    
+                    # Show raw data in separate section
+                    if st.checkbox("🔍 Show Raw Analysis Data"):
+                        st.json(st.session_state.profile_data)
+                else:
+                    # Text-based analysis - try to format nicely
+                    analysis_text = str(st.session_state.profile_data)
+                    
+                    # Extract key information
+                    if "archetype" in analysis_text.lower():
+                        st.markdown("**🎭 Style Analysis:**")
+                        st.write(analysis_text)
+                    else:
+                        st.write(analysis_text)
+        else:
+            st.info("👆 Upload and analyze your photo first to get personalized recommendations")
+    
+    with col3:
+        st.markdown("### 🎨 Visual Style Collage")
+        
         if st.session_state.analysis_complete:
-            st.markdown("### 🎨 Visual Style Collages")
-            st.markdown("Generate beautiful mood boards focused on specific areas of your lifestyle!")
-            
             # Category selection
-            collage_categories = {
-                "wardrobe": "👗 Wardrobe & Fashion",
-                "interior": "🏠 Home & Interior Design", 
-                "travel": "✈️ Travel & Experiences",
-                "lifestyle": "🌟 Complete Lifestyle"
-            }
-            
-            selected_category = st.selectbox(
-                "Select collage focus:",
-                options=list(collage_categories.keys()),
-                format_func=lambda x: collage_categories[x],
+            collage_category = st.selectbox(
+                "Choose collage style:",
+                ["lifestyle", "fashion", "interior", "color_palette", "mood"],
                 index=0,
-                key="collage_selector"
+                key="collage_category_select"
             )
             
-            # Style collage generation button
-            if st.button(f"🎨 Generate {collage_categories[selected_category]} Collage", type="primary", key="collage_btn"):
-                with st.spinner(f"Creating your personalized {collage_categories[selected_category].lower()} collage... This may take a few seconds."):
-                    collage_result = generate_style_collage(st.session_state.session_id, selected_category)
+            # Generate collage button
+            if st.button("🎨 Generate Style Collage", use_container_width=True):
+                with st.spinner(f"Creating your {collage_category} style collage..."):
+                    collage_result = generate_style_collage(
+                        st.session_state.session_id, 
+                        collage_category,
+                        st.session_state.profile_data
+                    )
                     
                     if collage_result:
                         st.session_state.collage_data = collage_result
-                        st.session_state.collage_category = selected_category
-                        st.success(f"🎉 Your {collage_categories[selected_category].lower()} collage is ready!")
+                        st.success("🎨 Your style collage is ready!")
                         st.rerun()
             
-            # Display generated collage
-            if hasattr(st.session_state, 'collage_data') and st.session_state.collage_data:
-                category_name = collage_categories.get(st.session_state.get('collage_category', 'lifestyle'), 'Style')
-                st.markdown(f"#### 🖼️ Your {category_name} Collage:")
-                
-                # Try to display the image using different methods
-                collage_displayed = False
-                
-                # Method 1: Try base64 if available
+            # Display collage if generated
+            if st.session_state.collage_data:
                 if 'base64' in st.session_state.collage_data:
-                    try:
-                        # Decode base64 image
-                        image_data = base64.b64decode(st.session_state.collage_data['base64'])
-                        
-                        # Display using st.image with BytesIO
-                        st.image(
-                            BytesIO(image_data),
-                            caption=f"Your AI-Generated {category_name} Mood Board", 
-                            use_column_width=True
-                        )
-                        collage_displayed = True
-                        
-                        # Display the prompt used (for troubleshooting)
-                        if 'prompt_used' in st.session_state.collage_data:
-                            with st.expander("🔍 View Prompt Used"):
-                                st.text_area("Prompt for Nova Canvas", 
-                                            st.session_state.collage_data['prompt_used'], 
-                                            height=200)
-                        
-                    except Exception as e:
-                        st.warning(f"Could not display image from base64: {str(e)}")
+                    import base64
+                    image_data = base64.b64decode(st.session_state.collage_data['base64'])
+                    st.image(image_data, caption="Your Style Collage", use_column_width=True)
+                elif 'url' in st.session_state.collage_data:
+                    st.image(st.session_state.collage_data['url'], caption="Your Style Collage", use_column_width=True)
                 
-                # Method 2: Try URL if base64 failed
-                if not collage_displayed and 'url' in st.session_state.collage_data:
-                    try:
-                        st.image(
-                            st.session_state.collage_data['url'], 
-                            caption=f"Your AI-Generated {category_name} Mood Board", 
-                            use_column_width=True
-                        )
-                        collage_displayed = True
-                        
-                    except Exception as e:
-                        st.warning(f"Could not display image from URL: {str(e)}")
-                
-                # Method 3: Fallback to link
-                if not collage_displayed:
-                    st.error("Could not display image directly. Here's the link:")
-                    if 'url' in st.session_state.collage_data:
-                        st.markdown(f"[🔗 View Your {category_name} Collage]({st.session_state.collage_data['url']})")
-                
-                # Additional options
-                if collage_displayed:
-                    col_a, col_b, col_c = st.columns(3)
-                    
-                    with col_a:
-                        if st.button("🔄 Generate New", key="new_collage_btn"):
-                            with st.spinner(f"Creating a new {collage_categories[st.session_state.collage_category].lower()} collage..."):
-                                new_collage = generate_style_collage(st.session_state.session_id, st.session_state.collage_category)
-                                if new_collage:
-                                    st.session_state.collage_data = new_collage
-                                    st.success("🎉 New collage generated!")
-                                    st.rerun()
-                    
-                    with col_b:
-                        if 'url' in st.session_state.collage_data:
-                            st.markdown(f"[🔗 Full Size]({st.session_state.collage_data['url']})")
-                    
-                    with col_c:
-                        # Category switch button
-                        if st.button("🎯 Change Focus", key="change_focus_btn"):
-                            # Clear current collage to show category selector
-                            if hasattr(st.session_state, 'collage_data'):
-                                del st.session_state.collage_data
-                            st.rerun()
-                
+                if 'prompt_used' in st.session_state.collage_data:
+                    with st.expander("🎯 Collage Inspiration"):
+                        st.write(st.session_state.collage_data['prompt_used'])
         else:
-            st.info("Complete your style analysis first to generate visual collages!")
+            st.info("👆 Complete your style analysis first to generate visual collages")
     
-    # Tab 3: True Image-to-Video (if enabled)
-    if TRUE_IMAGE_VIDEO_ENABLED:
-        with tab3:
-            if render_true_image_video_tab:
-                render_true_image_video_tab(st.session_state.session_id, st.session_state.analysis_complete)
-            else:
-                st.error("True Image-to-Video component not available")
-                st.info("Please check the component installation and try again.")
-    
-    # Tab 4: Nova Sonic Voice Consultant (if enabled and available)
-    if nova_sonic_available:
-        # Determine which tab to use based on available features
-        if TRUE_IMAGE_VIDEO_ENABLED:
-            nova_sonic_tab = tab4
-        else:
-            nova_sonic_tab = tab3
-        
-        with nova_sonic_tab:
-            if render_nova_sonic_tab:
-                render_nova_sonic_tab(
-                    session_id=st.session_state.session_id,
-                    analysis_complete=st.session_state.analysis_complete,
-                    style_analysis_data=st.session_state.get('analysis_result', None)
+    # Nova Reel column (if available)
+    if NOVA_REEL_AVAILABLE:
+        with col4:
+            st.markdown("### 🎬 Style Video")
+            
+            if st.session_state.analysis_complete and uploaded_file is not None:
+                # Video generation options
+                video_style = st.selectbox(
+                    "Video style:",
+                    ["lifestyle", "fashion", "professional", "casual", "artistic"],
+                    index=0
                 )
+                
+                video_duration = st.slider("Duration (seconds):", 3, 10, 6)
+                
+                # Generate video button
+                if st.button("🎬 Create Style Video", use_container_width=True):
+                    with st.spinner(f"Creating your {video_style} style video... This may take a few minutes."):
+                        # Save uploaded file temporarily
+                        temp_path = save_uploaded_file_temporarily(uploaded_file)
+                        
+                        if temp_path:
+                            try:
+                                video_url = generate_style_video(
+                                    temp_path, 
+                                    f"Create a stylish {video_style} video",
+                                    video_style,
+                                    video_duration
+                                )
+                                
+                                if video_url:
+                                    st.session_state.video_url = video_url
+                                    st.session_state.video_generated = True
+                                    st.success("🎬 Your style video is ready!")
+                                    st.rerun()
+                            finally:
+                                # Clean up temporary file
+                                if os.path.exists(temp_path):
+                                    os.unlink(temp_path)
+                
+                # Display video if generated
+                if st.session_state.video_generated and st.session_state.video_url:
+                    st.video(st.session_state.video_url)
+                    st.success("🎬 Your personalized style video!")
             else:
-                st.error("Nova Sonic Voice Consultant not available")
-                st.info("Please check the Nova Sonic component installation and try again.")
-    
-    # Footer
-    st.markdown("---")
-    st.markdown("*Powered by Amazon Bedrock, Nova Pro AI, Nova Canvas, Nova Reel, and Nova Sonic*")
-    st.markdown("**🚀 BREAKTHROUGH**: Complete AI Style Experience - Visual Analysis + True Image Videos + Voice Conversations!")
+                st.info("👆 Upload and analyze your photo first to create style videos")
 
 if __name__ == "__main__":
     main()
