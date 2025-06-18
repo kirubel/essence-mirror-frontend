@@ -402,7 +402,7 @@ def generate_recommendations_direct(session_id, profile_data=None):
         st.error(f"Error generating recommendations: {str(e)}")
         return None
 
-def generate_style_collage(session_id, category="lifestyle", profile_data=None):
+def generate_style_collage(session_id, category="lifestyle", profile_data=None, recommendations_data=None):
     """Generate a category-specific style collage using Nova Canvas with gender awareness"""
     try:
         # Extract gender information from profile
@@ -446,6 +446,14 @@ def generate_style_collage(session_id, category="lifestyle", profile_data=None):
                             {
                                 "name": "gender_context",
                                 "value": gender_context
+                            },
+                            {
+                                "name": "profile_data",
+                                "value": json.dumps(profile_data) if profile_data else "{}"
+                            },
+                            {
+                                "name": "recommendations_data",
+                                "value": json.dumps(recommendations_data) if recommendations_data else "{}"
                             }
                         ]
                     }
@@ -462,23 +470,29 @@ def generate_style_collage(session_id, category="lifestyle", profile_data=None):
         
         if 'response' in response_payload and 'responseBody' in response_payload['response']:
             response_body = response_payload['response']['responseBody']
-            if 'application/json' in response_body:
+            
+            # Handle direct responseBody format (current Lambda response format)
+            if isinstance(response_body, dict):
+                body_content = response_body
+            elif 'application/json' in response_body:
                 body_content = json.loads(response_body['application/json']['body'])
+            else:
+                body_content = response_body
                 
-                # Return both URL, base64, and prompt for better display options
-                result = {}
-                if 'collage_url' in body_content:
-                    result['url'] = body_content['collage_url']
-                if 'collage_base64' in body_content:
-                    result['base64'] = body_content['collage_base64']
-                if 'prompt_used' in body_content:
-                    result['prompt_used'] = body_content['prompt_used']
-                
-                if result:
-                    return result
-                elif 'error' in body_content:
-                    st.error(f"Error generating collage: {body_content['error']}")
-                    return None
+            # Return both URL, base64, and prompt for better display options
+            result = {}
+            if 'collage_url' in body_content:
+                result['url'] = body_content['collage_url']
+            if 'collage_base64' in body_content:
+                result['base64'] = body_content['collage_base64']
+            if 'prompt_used' in body_content:
+                result['prompt_used'] = body_content['prompt_used']
+            
+            if result:
+                return result
+            elif 'error' in body_content:
+                st.error(f"Error generating collage: {body_content['error']}")
+                return None
         
         return None
         
@@ -1000,10 +1014,36 @@ def main():
         st.markdown("### 🎨 Visual Style Collage")
         
         if st.session_state.analysis_complete:
-            # Category selection
+            # Debug info and test functionality
+            debug_enabled = st.checkbox("🔍 Debug Info", key="debug_collage")
+            
+            if debug_enabled:
+                st.write("**Session State Keys:**", list(st.session_state.keys()))
+                collage_data = st.session_state.get('collage_data')
+                if collage_data is not None:
+                    st.write("**Collage Data Keys:**", list(collage_data.keys()))
+                    st.write("**Collage Data Preview:**", {k: str(v)[:100] + "..." if len(str(v)) > 100 else str(v) for k, v in collage_data.items()})
+                else:
+                    st.write("**Collage Data:**", "None")
+                
+                recommendations_data = st.session_state.get('recommendations_data')
+                st.write("**Has Recommendations:**", recommendations_data is not None)
+                if recommendations_data:
+                    st.write("**Recommendations Preview:**", str(recommendations_data)[:200] + "..." if len(str(recommendations_data)) > 200 else str(recommendations_data))
+            
+            # Category selection with enhanced descriptions
+            collage_options = {
+                "fashion": "🎽 Fashion Lookbook - Showcase your recommended items and brands",
+                "lifestyle": "🌟 Lifestyle Vision - Your aspirational daily life aesthetic", 
+                "color_palette": "🎨 Color Palette - Perfect color coordination guide",
+                "interior": "🏠 Interior Aesthetic - Your ideal home environment",
+                "mood": "✨ Artistic Mood - Creative interpretation of your style essence"
+            }
+            
             collage_category = st.selectbox(
                 "Choose collage style:",
-                ["lifestyle", "fashion", "interior", "color_palette", "mood"],
+                list(collage_options.keys()),
+                format_func=lambda x: collage_options[x],
                 index=0,
                 key="collage_category_select"
             )
@@ -1011,29 +1051,71 @@ def main():
             # Generate collage button
             if st.button("🎨 Generate Style Collage", use_container_width=True):
                 with st.spinner(f"Creating your {collage_category} style collage..."):
-                    collage_result = generate_style_collage(
-                        st.session_state.session_id, 
-                        collage_category,
-                        st.session_state.profile_data
-                    )
-                    
-                    if collage_result:
-                        st.session_state.collage_data = collage_result
-                        st.success("🎨 Your style collage is ready!")
-                        st.rerun()
+                    try:
+                        collage_result = generate_style_collage(
+                            st.session_state.session_id, 
+                            collage_category,
+                            st.session_state.profile_data,
+                            st.session_state.get('recommendations_data', None)
+                        )
+                        
+                        if collage_result:
+                            st.session_state.collage_data = collage_result
+                            st.success("🎨 Your style collage is ready!")
+                            
+                            # Display immediately
+                            if 'base64' in collage_result:
+                                import base64
+                                image_data = base64.b64decode(collage_result['base64'])
+                                st.image(image_data, caption="Your Style Collage", use_column_width=True)
+                            
+                            if 'prompt_used' in collage_result:
+                                with st.expander("🎯 Collage Inspiration"):
+                                    st.write(collage_result['prompt_used'])
+                        else:
+                            st.error("Failed to generate collage. Please try again.")
+                    except Exception as e:
+                        st.error(f"Error generating collage: {str(e)}")
             
-            # Display collage if generated
-            if st.session_state.collage_data:
-                if 'base64' in st.session_state.collage_data:
-                    import base64
-                    image_data = base64.b64decode(st.session_state.collage_data['base64'])
-                    st.image(image_data, caption="Your Style Collage", use_column_width=True)
-                elif 'url' in st.session_state.collage_data:
-                    st.image(st.session_state.collage_data['url'], caption="Your Style Collage", use_column_width=True)
-                
-                if 'prompt_used' in st.session_state.collage_data:
-                    with st.expander("🎯 Collage Inspiration"):
-                        st.write(st.session_state.collage_data['prompt_used'])
+            # Test button for debugging (only show if debug is enabled)
+            if debug_enabled:
+                if st.button("🧪 Test Collage Generation", use_container_width=True):
+                    with st.spinner("Testing collage generation..."):
+                        try:
+                            test_result = generate_style_collage(
+                                "test-session-ui",
+                                "fashion",
+                                {"gender": "female", "age_group": "adult"},
+                                {"recommendations": [{"brand": "Test Brand", "product": "Test Product"}]}
+                            )
+                            if test_result:
+                                st.success("✅ Test collage generated successfully!")
+                                if 'base64' in test_result:
+                                    import base64
+                                    image_data = base64.b64decode(test_result['base64'])
+                                    st.image(image_data, caption="Test Collage", use_column_width=True)
+                            else:
+                                st.error("❌ Test collage generation failed")
+                        except Exception as e:
+                            st.error(f"❌ Test error: {str(e)}")
+            
+            # Display persistent collage
+            collage_data = st.session_state.get('collage_data')
+            if collage_data is not None:
+                st.write("**Stored Collage:**")
+                try:
+                    if 'base64' in collage_data:
+                        import base64
+                        image_data = base64.b64decode(collage_data['base64'])
+                        st.image(image_data, caption="Your Stored Style Collage", use_column_width=True)
+                    
+                    if st.button("🗑️ Clear Stored Collage", use_container_width=True):
+                        st.session_state.collage_data = None
+                        st.rerun()
+                        
+                except Exception as e:
+                    st.error(f"Error displaying stored collage: {str(e)}")
+                    st.session_state.collage_data = None
         else:
             st.info("👆 Complete your style analysis first to generate visual collages")
     
